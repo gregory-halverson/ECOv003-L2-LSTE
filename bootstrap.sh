@@ -18,10 +18,10 @@ if command -v brew &> /dev/null; then
   echo "⚠ Note: HDF4 is not available in Homebrew's main repository."
   echo "  Please choose an installation method:"
   echo ""
-  echo "  Option 1: Use conda (RECOMMENDED - easiest)"
-  echo "    conda create -n ecostress -c conda-forge hdf4 hdf5 libxml2 eccodes pkg-config"
-  echo "    conda activate ecostress"
-  echo "    cd src && make"
+  echo "  Option 1: Use mamba (RECOMMENDED - easiest)"
+  echo "    mamba create -n ECOv003-L2-LSTE -c conda-forge hdf4 hdf5 libxml2 eccodes pkg-config"
+  echo "    mamba activate ECOv003-L2-LSTE"
+  echo "    make install"
   echo ""
   echo "  Option 2: Build HDF4 from source"
   echo "    Download: https://support.hdfgroup.org/ftp/HDF/HDF_Current/src/"
@@ -52,22 +52,23 @@ else
   echo "  - pkg-config"
   echo ""
   echo "Then run:"
-  echo "  cd src && make"
+  echo "  make install"
   exit 1
 fi
 
 echo ""
 echo "✓ Dependencies installed successfully"
 echo ""
-echo "Building ECOSTRESS L2 LSTE..."
-cd "$(dirname "$0")/src"
+echo "Building and installing ECOSTRESS L2 LSTE..."
+cd "$(dirname "$0")"
+INSTALL_PREFIX="${PREFIX:-$HOME/.local}"
 make clean
-make
+make install PREFIX="$INSTALL_PREFIX"
 
 echo ""
 echo "=========================================="
 echo "✓ Build complete!"
 echo "=========================================="
 echo ""
-echo "Executable: ./L2_PGE"
+echo "Executable installed to: $INSTALL_PREFIX/bin/L2_PGE"
 echo ""
