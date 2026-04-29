@@ -1,3 +1,7 @@
+# C build artifacts
+src/*.o
+src/L2_PGE
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[cod]
