@@ -24,31 +24,31 @@
 ###################################################################
 
 ifndef XMLINC
-XMLINC = /pkg/afids/afids_latest/include/libxml2
+XMLINC = 
 endif
 
 ifndef XMLLIB
-XMLLIB = /pkg/afids/afids_latest/lib
+XMLLIB = 
 endif
 
 ifndef HDFINC
-HDFINC = /pkg/afids/afids_latest/include
+HDFINC = 
 endif
 
 ifndef HDFLIB
-HDFLIB = /pkg/afids/afids_latest/lib
+HDFLIB = 
 endif
 
 ifndef HDF5INC
-HDF5INC = /pkg/afids/afids_latest/include
+HDF5INC = 
 endif
 
 ifndef HDF5LIB
-HDF5LIB = /pkg/afids/afids_latest/lib
+HDF5LIB = 
 endif
 
 ifndef GRIBLIB
-GRIBLIB = /project/test/rfreepar/lib
+GRIBLIB = 
 endif
 
 ##################
