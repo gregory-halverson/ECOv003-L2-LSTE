@@ -40,18 +40,6 @@ jobs:
             mingw-w64-ucrt-x86_64-zlib
 
 
-      - name: Discover HDF4 header locations
-        shell: msys2 {0}
-        run: |
-          echo "=== find hdfi.h ==="
-          find /ucrt64 -name hdfi.h 2>/dev/null || echo "hdfi.h not found under /ucrt64"
-          echo "=== find hdf.h ==="
-          find /ucrt64 -name hdf.h 2>/dev/null || echo "hdf.h not found under /ucrt64"
-          echo "=== pkg-config hdf4 ==="
-          pkg-config --cflags hdf4 2>/dev/null || echo "no hdf4.pc"
-          echo "=== pkg-config hdf ==="
-          pkg-config --cflags hdf 2>/dev/null || echo "no hdf.pc"
-
       - name: Compile test
         shell: msys2 {0}
         run: |

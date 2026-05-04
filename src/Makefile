@@ -68,7 +68,7 @@ GRIBINC :=
 GRIBLIB :=
 else
 
-# HDF4 (required) - provides hdf.h, mfhdf.h, hdfi.h
+# HDF4 (required) - provides hdf.h and mfhdf.h
 # Try pkg-config first, then check conda/homebrew paths (HDF4 often doesn't have .pc file)
 HDF4_PREFIX := $(shell if [ -n "$$CONDA_PREFIX" ]; then echo $$CONDA_PREFIX; fi)
 ifeq ($(HDF4_PREFIX),)
