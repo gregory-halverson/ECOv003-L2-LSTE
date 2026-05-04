@@ -248,7 +248,7 @@ $(TARGET): $(TES_OBJ) $(HDR)
 	$(CC) $(ADD_CFLAGS) $(XP_DEFINES) $(TES_OBJ) $(LIB) -o $(TARGET)
 
 test: all
-	@if [ -f "$(TARGET)" ]; then \
+	@if [ -f "$(TARGET)" ] || [ -f "$(TARGET).exe" ]; then \
 		echo "PASS: build artifact exists at $(TARGET)"; \
 	else \
 		echo "FAIL: expected build artifact missing at $(TARGET)"; \
