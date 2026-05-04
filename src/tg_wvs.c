@@ -11,7 +11,9 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <sys/time.h>
+#ifndef _WIN32
 #include <sys/resource.h>
+#endif
 
 #define DEBUG
 #ifdef DEBUG
@@ -50,11 +52,13 @@ int tg_wvs(Mat3d *tg, Matrix *pwv, Matrix *senszen,
     int stat = 0;
     int check_4_truncated = -1;
 
-    // This function might need some extra stack space.
+#ifndef _WIN32
+    // Increase stack limit where supported (POSIX); Windows has no getrlimit/setrlimit.
     struct rlimit stack_limits;
     getrlimit(RLIMIT_STACK, &stack_limits);
     stack_limits.rlim_cur = stack_limits.rlim_max;
     setrlimit(RLIMIT_STACK, &stack_limits);
+#endif
 
 #ifdef DEBUG_PIXEL
     printf("tg_wvs: (%d,%d) pwv=%g senszen=%g solzen=%g emis_aster=%g\n        lrad=[",
