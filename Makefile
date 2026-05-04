@@ -34,4 +34,7 @@ environment:
 install: environment all
 	$(MAKE) -C src DEFAULT_ENV_NAME="$(ENV_NAME)" install PREFIX="$(PREFIX)" DESTDIR="$(DESTDIR)"
 
-.PHONY: all clean environment install
+test:
+	$(MAKE) -C src DEFAULT_ENV_NAME="$(ENV_NAME)" test
+
+.PHONY: all clean environment install test
