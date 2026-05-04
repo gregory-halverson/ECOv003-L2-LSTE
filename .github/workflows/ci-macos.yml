@@ -1,4 +1,4 @@
-name: Linux And macOS CI
+name: macOS CI
 
 on:
   push:
@@ -14,14 +14,8 @@ on:
 
 jobs:
   build-and-test:
-    name: Build And Test (${{ matrix.os }})
-    runs-on: ${{ matrix.os }}
-    strategy:
-      fail-fast: false
-      matrix:
-        os:
-          - ubuntu-latest
-          - macos-latest
+    name: Build And Test (macOS)
+    runs-on: macos-latest
 
     steps:
       - name: Checkout
