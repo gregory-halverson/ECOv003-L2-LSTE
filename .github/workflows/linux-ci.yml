@@ -21,21 +21,24 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Install dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y \
-            build-essential \
-            pkg-config \
-            libhdf4-dev \
-            libhdf5-dev \
-            libxml2-dev \
-            libeccodes-dev \
-            libexpat1-dev \
-            libjpeg-dev \
-            zlib1g-dev
+      - name: Setup micromamba
+        uses: mamba-org/setup-micromamba@v2
+        with:
+          environment-name: ECOv003-L2-LSTE
+          create-args: >-
+            -c conda-forge
+            hdf4
+            hdf5
+            libxml2
+            eccodes
+            pkg-config
+            expat
+            libjpeg-turbo
+            zlib
+            make
+            gcc
 
       - name: Compile test
         run: |
-          make clean
-          make test
+          micromamba run -n ECOv003-L2-LSTE make clean
+          micromamba run -n ECOv003-L2-LSTE make test
