@@ -99,6 +99,12 @@ endif
 HDF5INC := $(call PKG_CHECK,hdf5)
 HDF5LIB := $(call PKG_LIBS,hdf5)
 ifeq ($(HDF5INC),)
+  ifdef MSYS2_PREFIX
+    HDF5INC := -I$(MSYS2_PREFIX)/include
+    HDF5LIB := -L$(MSYS2_PREFIX)/lib -lhdf5_hl -lhdf5
+  endif
+endif
+ifeq ($(HDF5INC),)
 $(error HDF5 not found. Install with: brew install hdf5 (macOS) or apt-get install libhdf5-dev (Ubuntu))
 endif
 
@@ -106,10 +112,13 @@ endif
 # LibXML2 often doesn't provide .pc file in conda, so check conda/homebrew paths
 XMLINC := $(call PKG_CHECK,libxml-2.0)
 ifeq ($(XMLINC),)
-  # Try conda/homebrew paths
+  # Try conda/homebrew/MSYS2 paths
   ifdef CONDA_PREFIX
     XMLINC := -I$(CONDA_PREFIX)/include/libxml2
     XMLLIB := -L$(CONDA_PREFIX)/lib -lxml2
+  else ifdef MSYS2_PREFIX
+    XMLINC := -I$(MSYS2_PREFIX)/include/libxml2
+    XMLLIB := -L$(MSYS2_PREFIX)/lib -lxml2
   else
     XMLINC := $(shell if command -v brew >/dev/null 2>&1; then echo -I$$(brew --prefix libxml2)/include/libxml2; fi)
     XMLLIB := $(shell if command -v brew >/dev/null 2>&1; then echo -L$$(brew --prefix libxml2)/lib -lxml2; fi)
@@ -152,9 +161,11 @@ endif
 # Expat often doesn't provide .pc file in conda, so check conda/homebrew paths
 EXPATLIB := $(call PKG_LIBS,expat)
 ifeq ($(EXPATLIB),)
-  # Try conda/homebrew paths
+  # Try conda/homebrew/MSYS2 paths
   ifdef CONDA_PREFIX
     EXPATLIB := -L$(CONDA_PREFIX)/lib -lexpat
+  else ifdef MSYS2_PREFIX
+    EXPATLIB := -L$(MSYS2_PREFIX)/lib -lexpat
   else
     EXPATLIB := $(shell if command -v brew >/dev/null 2>&1; then echo -L$$(brew --prefix expat)/lib -lexpat; fi)
   endif
@@ -172,11 +183,16 @@ ifeq ($(GRIBLIB),)
   GRIBLIB := $(call PKG_LIBS,grib_api)
 endif
 ifeq ($(GRIBLIB),)
-  # Fallback for conda setups where pkg-config lookup is unreliable
+  # Fallback for conda/MSYS2 setups where pkg-config lookup is unreliable
   ifdef CONDA_PREFIX
     ifneq ($(wildcard $(CONDA_PREFIX)/include/eccodes.h),)
       GRIBINC := -I$(CONDA_PREFIX)/include
       GRIBLIB := -L$(CONDA_PREFIX)/lib -leccodes
+    endif
+  else ifdef MSYS2_PREFIX
+    ifneq ($(wildcard $(MSYS2_PREFIX)/include/eccodes.h),)
+      GRIBINC := -I$(MSYS2_PREFIX)/include
+      GRIBLIB := -L$(MSYS2_PREFIX)/lib -leccodes
     endif
   endif
 endif
