@@ -22,7 +22,7 @@
  *  Mat4dFloat32    4D matrix of float32
  */
 
-#include <hdfi.h>
+#include <hdf.h>
 #include <unistd.h>
 
 #define MATRIX_NAN -32768

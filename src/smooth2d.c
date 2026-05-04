@@ -20,6 +20,7 @@
 
 #include <assert.h>
 #include <stdlib.h>
+#include <string.h>
 #include "lste_lib.h"
 
 typedef struct

@@ -38,6 +38,16 @@ PKG_CONFIG_PATH := $(CONDA_PREFIX)/lib/pkgconfig:$(PKG_CONFIG_PATH)
 export PKG_CONFIG_PATH
 endif
 
+# MSYS2/MinGW (Windows) detection - set PKG_CONFIG_PATH and HDF4 subdir
+ifdef MSYSTEM
+  MSYS2_PREFIX := $(MSYSTEM_PREFIX)
+  ifeq ($(MSYS2_PREFIX),)
+    MSYS2_PREFIX := /ucrt64
+  endif
+  PKG_CONFIG_PATH := $(MSYS2_PREFIX)/lib/pkgconfig:$(PKG_CONFIG_PATH)
+  export PKG_CONFIG_PATH
+endif
+
 # Auto-discover dependencies using pkg-config
 # This makes the build portable across any system with installed packages
 
@@ -58,7 +68,7 @@ GRIBINC :=
 GRIBLIB :=
 else
 
-# HDF4 (required) - provides hdf.h, mfhdf.h, hdfi.h
+# HDF4 (required) - provides hdf.h and mfhdf.h
 # Try pkg-config first, then check conda/homebrew paths (HDF4 often doesn't have .pc file)
 HDF4_PREFIX := $(shell if [ -n "$$CONDA_PREFIX" ]; then echo $$CONDA_PREFIX; fi)
 ifeq ($(HDF4_PREFIX),)
@@ -66,8 +76,20 @@ ifeq ($(HDF4_PREFIX),)
 endif
 
 ifeq ($(HDF4_PREFIX),)
+  # MSYS2: HDF4 headers are in $(MSYS2_PREFIX)/include/hdf4/
+  ifdef MSYS2_PREFIX
+    HDF4_PREFIX := $(MSYS2_PREFIX)
+  endif
+endif
+
+ifeq ($(HDF4_PREFIX),)
   HDFINC := $(call PKG_CHECK,hdf)
   HDFLIB := $(call PKG_LIBS,hdf)
+else ifdef MSYS2_PREFIX
+  # MSYS2 installs HDF4 headers under include/hdf4/ subdirectory
+  # Note: MSYS2 HDF4 package does not ship libdf separately; mfhdf is sufficient
+  HDFINC := -I$(HDF4_PREFIX)/include/hdf4
+  HDFLIB := -L$(HDF4_PREFIX)/lib -lmfhdf
 else
   HDFINC := -I$(HDF4_PREFIX)/include
   HDFLIB := -L$(HDF4_PREFIX)/lib -lmfhdf -ldf
@@ -81,6 +103,12 @@ endif
 HDF5INC := $(call PKG_CHECK,hdf5)
 HDF5LIB := $(call PKG_LIBS,hdf5)
 ifeq ($(HDF5INC),)
+  ifdef MSYS2_PREFIX
+    HDF5INC := -I$(MSYS2_PREFIX)/include
+    HDF5LIB := -L$(MSYS2_PREFIX)/lib -lhdf5_hl -lhdf5
+  endif
+endif
+ifeq ($(HDF5INC),)
 $(error HDF5 not found. Install with: brew install hdf5 (macOS) or apt-get install libhdf5-dev (Ubuntu))
 endif
 
@@ -88,10 +116,13 @@ endif
 # LibXML2 often doesn't provide .pc file in conda, so check conda/homebrew paths
 XMLINC := $(call PKG_CHECK,libxml-2.0)
 ifeq ($(XMLINC),)
-  # Try conda/homebrew paths
+  # Try conda/homebrew/MSYS2 paths
   ifdef CONDA_PREFIX
     XMLINC := -I$(CONDA_PREFIX)/include/libxml2
     XMLLIB := -L$(CONDA_PREFIX)/lib -lxml2
+  else ifdef MSYS2_PREFIX
+    XMLINC := -I$(MSYS2_PREFIX)/include/libxml2
+    XMLLIB := -L$(MSYS2_PREFIX)/lib -lxml2
   else
     XMLINC := $(shell if command -v brew >/dev/null 2>&1; then echo -I$$(brew --prefix libxml2)/include/libxml2; fi)
     XMLLIB := $(shell if command -v brew >/dev/null 2>&1; then echo -L$$(brew --prefix libxml2)/lib -lxml2; fi)
@@ -134,9 +165,11 @@ endif
 # Expat often doesn't provide .pc file in conda, so check conda/homebrew paths
 EXPATLIB := $(call PKG_LIBS,expat)
 ifeq ($(EXPATLIB),)
-  # Try conda/homebrew paths
+  # Try conda/homebrew/MSYS2 paths
   ifdef CONDA_PREFIX
     EXPATLIB := -L$(CONDA_PREFIX)/lib -lexpat
+  else ifdef MSYS2_PREFIX
+    EXPATLIB := -L$(MSYS2_PREFIX)/lib -lexpat
   else
     EXPATLIB := $(shell if command -v brew >/dev/null 2>&1; then echo -L$$(brew --prefix expat)/lib -lexpat; fi)
   endif
@@ -147,6 +180,12 @@ endif
 
 # GRIB API / ecCodes (required) - provides grib_api.h
 # Try ecCodes first (modern), fall back to grib_api (legacy)
+# On MSYS2, pkg-config --libs eccodes emits a bare Windows-style path that breaks
+# the linker command, so always use the explicit prefix path on MSYS2.
+ifdef MSYS2_PREFIX
+  GRIBINC := -I$(MSYS2_PREFIX)/include
+  GRIBLIB := -L$(MSYS2_PREFIX)/lib -leccodes
+else
 GRIBINC := $(call PKG_CHECK,eccodes)
 GRIBLIB := $(call PKG_LIBS,eccodes)
 ifeq ($(GRIBLIB),)
@@ -161,6 +200,7 @@ ifeq ($(GRIBLIB),)
       GRIBLIB := -L$(CONDA_PREFIX)/lib -leccodes
     endif
   endif
+endif
 endif
 ifeq ($(GRIBLIB),)
 $(error ecCodes/GRIB API not found. Install with: brew install eccodes (macOS) or apt-get install libeccodes-dev (Ubuntu))
@@ -231,7 +271,13 @@ HDR = ../include/asterged.h \
       ../include/tg_wvs.h
       
 # Combine the libraries using pkg-config results
-LIB = $(HDFLIB) $(HDF5LIB) $(GRIBLIB) $(XMLLIB) $(EXPATLIB) -ldl -ldf -ljpeg -lz -lm 
+# -ldl is Linux-only (not available on Windows/MSYS2)
+# -ldf is part of HDF4 but not a separate lib on MSYS2 (already in -lmfhdf)
+ifdef MSYS2_PREFIX
+LIB = $(HDFLIB) $(HDF5LIB) $(GRIBLIB) $(XMLLIB) $(EXPATLIB) -ljpeg -lz -lm
+else
+LIB = $(HDFLIB) $(HDF5LIB) $(GRIBLIB) $(XMLLIB) $(EXPATLIB) -ldl -ldf -ljpeg -lz -lm
+endif
 
 # Executable goes to ../bin/
 TARGET = $(BINDIR)/L2_PGE
@@ -248,7 +294,7 @@ $(TARGET): $(TES_OBJ) $(HDR)
 	$(CC) $(ADD_CFLAGS) $(XP_DEFINES) $(TES_OBJ) $(LIB) -o $(TARGET)
 
 test: all
-	@if [ -f "$(TARGET)" ]; then \
+	@if [ -f "$(TARGET)" ] || [ -f "$(TARGET).exe" ]; then \
 		echo "PASS: build artifact exists at $(TARGET)"; \
 	else \
 		echo "FAIL: expected build artifact missing at $(TARGET)"; \
