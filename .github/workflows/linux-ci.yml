@@ -31,14 +31,19 @@ jobs:
             hdf5
             libxml2
             eccodes
-            pkg-config
+            pkgconf
             expat
             libjpeg-turbo
             zlib
             make
             gcc
+            gxx
 
       - name: Compile test
         run: |
-          micromamba run -n ECOv003-L2-LSTE make clean
-          micromamba run -n ECOv003-L2-LSTE make test
+          micromamba run -n ECOv003-L2-LSTE bash -lc '
+            set -euo pipefail
+            test -f "$CONDA_PREFIX/include/libxml2/libxml/xmlwriter.h"
+            make clean
+            make test CFLAGS="-I$CONDA_PREFIX/include/libxml2"
+          '
