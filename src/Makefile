@@ -38,6 +38,16 @@ PKG_CONFIG_PATH := $(CONDA_PREFIX)/lib/pkgconfig:$(PKG_CONFIG_PATH)
 export PKG_CONFIG_PATH
 endif
 
+# MSYS2/MinGW (Windows) detection - set PKG_CONFIG_PATH and HDF4 subdir
+ifdef MSYSTEM
+  MSYS2_PREFIX := $(MSYSTEM_PREFIX)
+  ifeq ($(MSYS2_PREFIX),)
+    MSYS2_PREFIX := /ucrt64
+  endif
+  PKG_CONFIG_PATH := $(MSYS2_PREFIX)/lib/pkgconfig:$(PKG_CONFIG_PATH)
+  export PKG_CONFIG_PATH
+endif
+
 # Auto-discover dependencies using pkg-config
 # This makes the build portable across any system with installed packages
 
@@ -66,10 +76,18 @@ ifeq ($(HDF4_PREFIX),)
 endif
 
 ifeq ($(HDF4_PREFIX),)
+  # MSYS2: HDF4 has no .pc file; headers live in $(MSYS2_PREFIX)/include/hdf/
+  ifdef MSYS2_PREFIX
+    HDF4_PREFIX    := $(MSYS2_PREFIX)
+    HDF4_INC_SUBDIR := /hdf
+  endif
+endif
+
+ifeq ($(HDF4_PREFIX),)
   HDFINC := $(call PKG_CHECK,hdf)
   HDFLIB := $(call PKG_LIBS,hdf)
 else
-  HDFINC := -I$(HDF4_PREFIX)/include
+  HDFINC := -I$(HDF4_PREFIX)/include$(HDF4_INC_SUBDIR)
   HDFLIB := -L$(HDF4_PREFIX)/lib -lmfhdf -ldf
 endif
 
