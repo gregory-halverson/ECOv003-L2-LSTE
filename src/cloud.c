@@ -139,9 +139,15 @@ void process_cloud(RAD *rad,
     mat_clear(&t_lut_lon);
 
     // Get ECOSTRESS observation time info    
-    const char* start_pos = rindex(cloud_filename, '/');
+    const char* start_pos = strrchr(cloud_filename, '/');
     if (start_pos == NULL)
+    {
+        start_pos = strrchr(cloud_filename, '\\');
+    }
+    if (start_pos == NULL)
+    {
         start_pos = cloud_filename;
+    }
     const char* L2_CLOUD = strstr(start_pos, "_CLOUD");
     if (L2_CLOUD == NULL)
         ERREXIT(14, "_CLOUD not in filename %s", cloud_filename);
