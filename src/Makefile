@@ -118,6 +118,17 @@ else
   endif
 endif
 XMLLIB := $(XMLLIB_VAL)
+ifdef CONDA_PREFIX
+XMLLIB_FILE := $(firstword $(wildcard \
+  $(CONDA_PREFIX)/lib/libxml2.so \
+  $(CONDA_PREFIX)/lib/libxml2.so.* \
+  $(CONDA_PREFIX)/lib/libxml2.a))
+ifneq ($(XMLLIB_FILE),)
+ifneq ($(findstring -lxml2,$(XMLLIB)),)
+XMLLIB := $(filter-out -lxml2,$(XMLLIB)) $(XMLLIB_FILE)
+endif
+endif
+endif
 
 # Expat (required) - provides expat.h
 # Expat often doesn't provide .pc file in conda, so check conda/homebrew paths
