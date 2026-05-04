@@ -87,8 +87,9 @@ ifeq ($(HDF4_PREFIX),)
   HDFLIB := $(call PKG_LIBS,hdf)
 else ifdef MSYS2_PREFIX
   # MSYS2 installs HDF4 headers under include/hdf4/ subdirectory
+  # Note: MSYS2 HDF4 package does not ship libdf separately; mfhdf is sufficient
   HDFINC := -I$(HDF4_PREFIX)/include/hdf4
-  HDFLIB := -L$(HDF4_PREFIX)/lib -lmfhdf -ldf
+  HDFLIB := -L$(HDF4_PREFIX)/lib -lmfhdf
 else
   HDFINC := -I$(HDF4_PREFIX)/include
   HDFLIB := -L$(HDF4_PREFIX)/lib -lmfhdf -ldf
@@ -179,6 +180,12 @@ endif
 
 # GRIB API / ecCodes (required) - provides grib_api.h
 # Try ecCodes first (modern), fall back to grib_api (legacy)
+# On MSYS2, pkg-config --libs eccodes emits a bare Windows-style path that breaks
+# the linker command, so always use the explicit prefix path on MSYS2.
+ifdef MSYS2_PREFIX
+  GRIBINC := -I$(MSYS2_PREFIX)/include
+  GRIBLIB := -L$(MSYS2_PREFIX)/lib -leccodes
+else
 GRIBINC := $(call PKG_CHECK,eccodes)
 GRIBLIB := $(call PKG_LIBS,eccodes)
 ifeq ($(GRIBLIB),)
@@ -186,18 +193,14 @@ ifeq ($(GRIBLIB),)
   GRIBLIB := $(call PKG_LIBS,grib_api)
 endif
 ifeq ($(GRIBLIB),)
-  # Fallback for conda/MSYS2 setups where pkg-config lookup is unreliable
+  # Fallback for conda setups where pkg-config lookup is unreliable
   ifdef CONDA_PREFIX
     ifneq ($(wildcard $(CONDA_PREFIX)/include/eccodes.h),)
       GRIBINC := -I$(CONDA_PREFIX)/include
       GRIBLIB := -L$(CONDA_PREFIX)/lib -leccodes
     endif
-  else ifdef MSYS2_PREFIX
-    ifneq ($(wildcard $(MSYS2_PREFIX)/include/eccodes.h),)
-      GRIBINC := -I$(MSYS2_PREFIX)/include
-      GRIBLIB := -L$(MSYS2_PREFIX)/lib -leccodes
-    endif
   endif
+endif
 endif
 ifeq ($(GRIBLIB),)
 $(error ecCodes/GRIB API not found. Install with: brew install eccodes (macOS) or apt-get install libeccodes-dev (Ubuntu))
@@ -268,7 +271,13 @@ HDR = ../include/asterged.h \
       ../include/tg_wvs.h
       
 # Combine the libraries using pkg-config results
-LIB = $(HDFLIB) $(HDF5LIB) $(GRIBLIB) $(XMLLIB) $(EXPATLIB) -ldl -ldf -ljpeg -lz -lm 
+# -ldl is Linux-only (not available on Windows/MSYS2)
+# -ldf is part of HDF4 but not a separate lib on MSYS2 (already in -lmfhdf)
+ifdef MSYS2_PREFIX
+LIB = $(HDFLIB) $(HDF5LIB) $(GRIBLIB) $(XMLLIB) $(EXPATLIB) -ljpeg -lz -lm
+else
+LIB = $(HDFLIB) $(HDF5LIB) $(GRIBLIB) $(XMLLIB) $(EXPATLIB) -ldl -ldf -ljpeg -lz -lm
+endif
 
 # Executable goes to ../bin/
 TARGET = $(BINDIR)/L2_PGE
