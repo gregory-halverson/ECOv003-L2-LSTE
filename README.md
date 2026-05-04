@@ -10,6 +10,10 @@ Glynn C. Hulley (he/him)<br>
 [glynn.hulley@jpl.nasa.gov](mailto:glynn.hulley@jpl.nasa.gov)<br>
 NASA Jet Propulsion Laboratory 321H
 
+Robert Freepartner (he/him)<br>
+[robert.freepartner@jpl.nasa.gov](robert.freepartner@jpl.nasa.gov)<br>
+Raytheon
+
 ## Cross-Platform Installation
 
 This C package was designed to be deployed on Linux, but has been retrofitted to compile on macOS and Windows as well, using mamba to consistently install cross-platform dependencies. Continuous integration checks for all three platforms have been included with status badges at the top of the README.
