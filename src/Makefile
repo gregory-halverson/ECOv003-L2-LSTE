@@ -102,12 +102,33 @@ $(error libxml2 not found. Use: conda create -n ecostress -c conda-forge hdf4 hd
 endif
 XMLLIB_VAL := $(XMLLIB)
 ifeq ($(XMLLIB_VAL),)
-  XMLLIB_VAL := $(call PKG_LIBS,libxml2-2.0)
+  XMLLIB_VAL := $(call PKG_LIBS,libxml-2.0)
 endif
 ifeq ($(XMLLIB_VAL),)
-  XMLLIB_VAL := -lxml2
+  ifdef CONDA_PREFIX
+    XMLLIB_VAL := -L$(CONDA_PREFIX)/lib -lxml2
+  else
+    XMLLIB_VAL := -lxml2
+  endif
+else
+  ifdef CONDA_PREFIX
+    ifeq ($(findstring -L,$(XMLLIB_VAL)),)
+      XMLLIB_VAL := -L$(CONDA_PREFIX)/lib $(XMLLIB_VAL)
+    endif
+  endif
 endif
 XMLLIB := $(XMLLIB_VAL)
+ifdef CONDA_PREFIX
+XMLLIB_FILE := $(firstword $(wildcard \
+  $(CONDA_PREFIX)/lib/libxml2.so \
+  $(CONDA_PREFIX)/lib/libxml2.so.* \
+  $(CONDA_PREFIX)/lib/libxml2.a))
+ifneq ($(XMLLIB_FILE),)
+ifneq ($(findstring -lxml2,$(XMLLIB)),)
+XMLLIB := $(filter-out -lxml2,$(XMLLIB)) $(XMLLIB_FILE)
+endif
+endif
+endif
 
 # Expat (required) - provides expat.h
 # Expat often doesn't provide .pc file in conda, so check conda/homebrew paths

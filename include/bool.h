@@ -47,8 +47,15 @@ File: bool.h
 !END
 ****************************************************************************/
 
-/* Define the bool (logical) type */
-
+/* Define the bool (logical) type. */
+#if defined(__cplusplus)
+/* C++ has built-in bool/true/false. */
+#elif defined(__STDC_VERSION__) && (__STDC_VERSION__ >= 202311L)
+/* C23 has built-in bool/true/false keywords. */
+#elif defined(__STDC_VERSION__) && (__STDC_VERSION__ >= 199901L)
+/* C99+ provides bool/true/false via stdbool.h. */
+#include <stdbool.h>
+#else
 #ifdef true
 #undef true
 #endif
@@ -56,5 +63,6 @@ File: bool.h
 #undef false
 #endif
 typedef enum {false = 0, true = 1} bool;
+#endif
 
 #endif
