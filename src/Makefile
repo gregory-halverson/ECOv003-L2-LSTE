@@ -76,7 +76,7 @@ ifeq ($(HDF4_PREFIX),)
 endif
 
 ifeq ($(HDF4_PREFIX),)
-  # MSYS2: HDF4 has no .pc file; headers are in $(MSYS2_PREFIX)/include/hdf/
+  # MSYS2: HDF4 headers are in $(MSYS2_PREFIX)/include/hdf4/
   ifdef MSYS2_PREFIX
     HDF4_PREFIX := $(MSYS2_PREFIX)
   endif
@@ -86,8 +86,8 @@ ifeq ($(HDF4_PREFIX),)
   HDFINC := $(call PKG_CHECK,hdf)
   HDFLIB := $(call PKG_LIBS,hdf)
 else ifdef MSYS2_PREFIX
-  # MSYS2 installs HDF4 headers under include/hdf/ subdirectory
-  HDFINC := -I$(HDF4_PREFIX)/include/hdf
+  # MSYS2 installs HDF4 headers under include/hdf4/ subdirectory
+  HDFINC := -I$(HDF4_PREFIX)/include/hdf4
   HDFLIB := -L$(HDF4_PREFIX)/lib -lmfhdf -ldf
 else
   HDFINC := -I$(HDF4_PREFIX)/include
