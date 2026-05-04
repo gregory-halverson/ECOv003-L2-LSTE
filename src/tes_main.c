@@ -4910,7 +4910,7 @@ int main (int argc, char *argv[])
     uint16 fillu16 = 0;
 
     uint16 minLST = 7500;
-    uint maxLST = 65535;
+    uint16 maxLST = 65535;
     stat = writeDatasetMetadataHdf5(h5out, "/HDFEOS/GRIDS/ECO_L2G_LSTE_70m/Data Fields/LST",
             "Land Surface Temperature", "K", 
             DFNT_UINT16, &minLST, &maxLST,

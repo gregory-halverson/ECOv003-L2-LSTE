@@ -1083,9 +1083,9 @@ int hdfwrite_mat4d(hdf4id_t sd_fid, const char *dataset, Mat4d *mat)
 // --------------------------------------------------------------
 static int hdf5_2d_compress = false;
 static hsize_t hdf5_2d_chunk[2] = {1, 1};
-static uint hdf5_2d_deflate = 0;
+static unsigned int hdf5_2d_deflate = 0;
 
-void set_hdf5_2d_compression_on(hsize_t dim1, hsize_t dim2, uint deflate)
+void set_hdf5_2d_compression_on(hsize_t dim1, hsize_t dim2, unsigned int deflate)
 {
     hdf5_2d_compress = true;
     hdf5_2d_chunk[0] = dim1;

@@ -5,6 +5,7 @@
 //#define NEG_IS_NAN
 
 #include <assert.h>
+#include <string.h>
 #include "lste_lib.h"
 
 int debug_lste_lib = 0;

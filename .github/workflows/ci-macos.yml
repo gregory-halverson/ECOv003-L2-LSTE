@@ -1,0 +1,44 @@
+name: macOS CI
+
+on:
+  push:
+    branches:
+      - '**'
+  pull_request:
+    branches:
+      - main
+    types:
+      - opened
+      - synchronize
+      - reopened
+
+jobs:
+  build-and-test:
+    name: Build And Test (macOS)
+    runs-on: macos-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup micromamba
+        uses: mamba-org/setup-micromamba@v2
+        with:
+          environment-name: ECOv003-L2-LSTE
+          create-args: >-
+            -c conda-forge
+            hdf4
+            hdf5
+            libxml2
+            eccodes
+            pkgconf
+            expat
+            libjpeg-turbo
+            zlib
+            make
+
+      - name: Compile test
+        run: |
+          XMLINC="$MAMBA_ROOT_PREFIX/envs/ECOv003-L2-LSTE/include/libxml2"
+          micromamba run -n ECOv003-L2-LSTE make clean
+          micromamba run -n ECOv003-L2-LSTE make test CFLAGS="-I$XMLINC"

@@ -156,7 +156,7 @@ int hdfwrite_mat4d(hdf4id_t sd_fid, const char *dataset, Mat4d *mat);
 /// @param dim1         chunk dimension 1
 /// @param dim2         chunk dimension 2
 /// @param deflate      0 (no compression) to 9 (max compression)
-void set_hdf5_2d_compression_on(hsize_t dim1, hsize_t dim2, uint deflate);
+void set_hdf5_2d_compression_on(hsize_t dim1, hsize_t dim2, unsigned int deflate);
 
 /// @brief Remove chunking/compression for 2D output.
 void set_hdf5_2d_compression_off();
