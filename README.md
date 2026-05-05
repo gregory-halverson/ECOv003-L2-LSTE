@@ -33,12 +33,13 @@ make environment
 ```
 
 Activate the `ECOv003-L2-LSTE` mamba environment before compiling:
-```
+
+```bash
 mamba activate ECOv003-L2-LSTE
 ```
 
 Once the mamba environment has been activated on Linux, macOS, or Windows, you should be able to install:
 
-```
+```bash
 make install
 ```
