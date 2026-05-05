@@ -32,7 +32,7 @@ To utilize the cross-platform installation, install conda/mamba using [miniforge
 
 ### RTTOV
 
-This software requires installation of Radiative Transfer for TOVS (RTTOV), which can be obtained from [Eumetsat](https://nwp-saf.eumetsat.int/site/software/rttov/). This radiative transfer model is used for atmospheric correction. RTTOV is not open-source, but it is free to use for registered users.
+This software requires installation of Radiative Transfer for TOVS (RTTOV), which can be obtained from [Eumetsat](https://nwp-saf.eumetsat.int/site/software/rttov/). This radiative transfer model is used for atmospheric correction. RTTOV is not open-source, but it is free to use for registered users. This software package uses RTTOV 12.2.0, which is no longer supported by Eumetsat, but is still available for download.
 
 ## Cross-Platform Installation
 
