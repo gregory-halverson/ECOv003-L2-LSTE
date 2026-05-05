@@ -31,7 +31,28 @@ To utilize the cross-platform installation, install conda/mamba using [miniforge
 
 ### RTTOV
 
-This software requires installation of Radiative Transfer for TOVS (RTTOV), which can be obtained from [Eumetsat](https://nwp-saf.eumetsat.int/site/software/rttov/). This radiative transfer model is used for atmospheric correction. RTTOV is not open-source, but it is free to use for registered users. This software package uses RTTOV 12.2.0, which is no longer supported by Eumetsat, but is still available for download.
+This software requires the Radiative Transfer for TOVS (RTTOV) radiative transfer model for atmospheric correction. RTTOV is not open-source, but is free for registered users. To obtain it:
+
+1. [Register with the NWP SAF](https://nwp-saf.eumetsat.int/site/register/) (or [log in](https://nwp-saf.eumetsat.int/site/login/) if already registered).
+2. Add RTTOV to your software preferences, then download **RTTOV v12** from the [RTTOV v12 page](https://nwp-saf.eumetsat.int/site/software/rttov/rttov-v12/). This package uses **RTTOV 12.2.0**, which is no longer supported by the NWP SAF but remains available for download.
+
+#### Compiling the RTTOV forward model
+
+This repository includes a Fortran 90 forward model driver (`src/rttov_ECOSTRESS_fwd.F90`) that must be compiled against the RTTOV v12 Fortran libraries. Compile it according to the RTTOV v12 build instructions to produce the executable `rttov_ECOSTRESS_fwd.exe`.
+
+> **Note:** The comment `RTTOV VERSION 11` in `src/rttov_ECOSTRESS_fwd.F90` reflects the RTTOV v11 example template the file was derived from. The code must be compiled and run against **RTTOV v12** libraries.
+
+#### Coefficient file
+
+The ECOSTRESS instrument coefficient file (`OSP/rtcoef_iss_1_ecostres_v7pred.dat`) is already included in this repository. You do not need to download it separately.
+
+#### Configuring runtime paths
+
+RTTOV is invoked as a subprocess at runtime — it is not linked into the `L2_PGE` binary. Before running the PGE, edit `OSP/PgeRunParameters.xml` to set the correct paths for your installation:
+
+```xml
+<scalar name="RttovExe">/path/to/rttov_ECOSTRESS_fwd.exe</scalar>
+<scalar name="RttovCoef">/path/to/OSP/rtcoef_iss_1_ecostres_v7pred.dat</scalar>
 
 ## Cross-Platform Installation
 
