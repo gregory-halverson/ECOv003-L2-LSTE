@@ -26,17 +26,15 @@ NASA Jet Propulsion Laboratory 321H
 
 ### mamba
 
+This C package was designed to be deployed on Linux, but has been retrofitted to compile on macOS and Windows as well, using mamba to consistently install cross-platform dependencies. Continuous integration checks for all three platforms have been included with status badges at the top of the README.
+
 To utilize the cross-platform installation, install conda/mamba using [miniforge](https://github.com/conda-forge/miniforge).
 
 ### RTTOV
 
-This software requires installation of Radiative Transfer for TOVS (RTTOV), which can be obtained from [Eumetsat](https://nwp-saf.eumetsat.int/site/software/rttov/).
-
-This radiative transfer model is used for atmospheric correction.
+This software requires installation of Radiative Transfer for TOVS (RTTOV), which can be obtained from [Eumetsat](https://nwp-saf.eumetsat.int/site/software/rttov/). This radiative transfer model is used for atmospheric correction. RTTOV is not open-source, but it is free to use for registered users.
 
 ## Cross-Platform Installation
-
-This C package was designed to be deployed on Linux, but has been retrofitted to compile on macOS and Windows as well, using mamba to consistently install cross-platform dependencies. Continuous integration checks for all three platforms have been included with status badges at the top of the README.
 
 A make target for generating a mamba environment has been supplied that will install HDF all other dependencies:
 
