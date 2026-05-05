@@ -14,6 +14,14 @@ Robert Freepartner (he/him)<br>
 [robert.freepartner@jpl.nasa.gov](robert.freepartner@jpl.nasa.gov)<br>
 Raytheon
 
+Tinh La (he/him)<br>
+[tinh.t.la@jpl.nasa.gov](mailto:tinh.t.la@jpl.nasa.gov)<br>
+NASA Jet Propulsion Laboratory 321H
+
+[Gregory H. Halverson](https://github.com/gregory-halverson-jpl) (they/them)<br>
+[gregory.h.halverson@jpl.nasa.gov](mailto:gregory.h.halverson@jpl.nasa.gov)<br>
+NASA Jet Propulsion Laboratory 321H
+
 ## Cross-Platform Installation
 
 This C package was designed to be deployed on Linux, but has been retrofitted to compile on macOS and Windows as well, using mamba to consistently install cross-platform dependencies. Continuous integration checks for all three platforms have been included with status badges at the top of the README.
