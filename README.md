@@ -11,7 +11,6 @@ Glynn C. Hulley (he/him)<br>
 NASA Jet Propulsion Laboratory 321H
 
 Robert Freepartner (he/him)<br>
-[robert.freepartner@jpl.nasa.gov](robert.freepartner@jpl.nasa.gov)<br>
 Raytheon
 
 Tinh La (he/him)<br>
