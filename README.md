@@ -18,6 +18,15 @@ Tinh La (he/him)<br>
 [tinh.t.la@jpl.nasa.gov](mailto:tinh.t.la@jpl.nasa.gov)<br>
 NASA Jet Propulsion Laboratory 321H
 
+Dr. Tanvir Islam<br>
+NASA Jet Propulsion Laboratory
+
+Dr. Nabin Malakar<br>
+NASA Jet Propulsion Laboratory
+
+Simon Latyshev<br>
+Raytheon
+
 [Gregory H. Halverson](https://github.com/gregory-halverson-jpl) (they/them)<br>
 [gregory.h.halverson@jpl.nasa.gov](mailto:gregory.h.halverson@jpl.nasa.gov)<br>
 NASA Jet Propulsion Laboratory 321H
