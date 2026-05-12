@@ -67,6 +67,50 @@ make install
 
 ## Algorithm
 
+```mermaid
+flowchart TD
+	subgraph Inputs
+		L1CG[ECOSTRESS L1CG TOA radiance]
+		NWP[NWP profiles\n(temp, WV, pressure, skin temp)]
+		ASTER[ASTER GED emissivity / NDVI]
+		LUTs[Algorithm LUTs\n(Planck, cloud BT, SST coeffs, uncertainty coeffs)]
+		GEO[Geolocation / viewing geometry]
+		MASK[Land-water / snow masks]
+	end
+
+	L1CG --> AC
+	NWP --> AC
+	GEO --> AC
+	AC[Atmospheric Correction\n(RTTOV)] --> WVS
+	ASTER --> WVS
+	WVS[TG-WVS humidity correction\n(applied when PWV is high)] --> TES
+
+	TES[TES retrieval\n(NEM + MMD + LST)] --> LSTE
+	LUTs --> TES
+	MASK --> TES
+
+	TES --> CLOUD
+	LUTs --> CLOUD
+	CLOUD[Cloud detection\n(BT-LUT + emissivity test)] --> CLOUD_OUT
+
+	TES --> SST
+	GEO --> SST
+	LUTs --> SST
+	MASK --> SST
+	SST[Ocean split-window SST\n(replaces TES LST over water)] --> LSTE
+
+	TES --> UQ
+	GEO --> UQ
+	LUTs --> UQ
+	UQ[Uncertainty quantification\n(LST/emissivity error + quality tiers)] --> QC
+
+	LSTE[ECOv003_L2G_LSTE\n(LST + emissivity fields)]
+	CLOUD_OUT[ECOv003_L2G_CLOUD\n(cloud mask)]
+	QC[QC plane\n(error estimates + quality flags)]
+```
+
+
+
 ### Atmospheric Correction (RTTOV)
 
 Top-of-atmosphere radiances from the ECOSTRESS L1CG product are atmospherically corrected using the Radiative Transfer for TOVS (RTTOV) model. NWP atmospheric profiles (temperature, water vapor mixing ratio, surface pressure, and skin temperature) from MERRA-2, GEOS-5, NCEP, or ECMWF are interpolated to each pixel and passed to RTTOV, which computes per-band transmittance (`t`), upwelling path radiance (`pathr`), and downwelling sky radiance (`skyr`).
