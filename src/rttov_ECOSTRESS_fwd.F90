@@ -14,7 +14,7 @@
 !     *************************************************************
 !     
 !     TEST PROGRAM FOR RTTOV FORWARD MODEL
-!     RTTOV VERSION 11
+!     RTTOV VERSION 12
 !     
 !     To run this program you must have the following files
 !     either resident in the same directory or set up as a
