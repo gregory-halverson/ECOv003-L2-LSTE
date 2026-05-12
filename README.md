@@ -111,9 +111,9 @@ make install
 flowchart TD
 	subgraph Inputs
 		L1CG[ECOSTRESS L1CG TOA radiance]
-		NWP[NWP profiles\n(temp, WV, pressure, skin temp)]
+		NWP[NWP profiles<br/>temp, WV, pressure, skin temp]
 		ASTER[ASTER GED emissivity / NDVI]
-		LUTs[Algorithm LUTs\n(Planck, cloud BT, SST coeffs, uncertainty coeffs)]
+		LUTs[Algorithm LUTs<br/>Planck, cloud BT, SST coeffs, uncertainty coeffs]
 		GEO[Geolocation / viewing geometry]
 		MASK[Land-water / snow masks]
 	end
@@ -121,32 +121,32 @@ flowchart TD
 	L1CG --> AC
 	NWP --> AC
 	GEO --> AC
-	AC[Atmospheric Correction\n(RTTOV)] --> WVS
+	AC[Atmospheric Correction<br/>RTTOV] --> WVS
 	ASTER --> WVS
-	WVS[TG-WVS humidity correction\n(applied when PWV is high)] --> TES
+	WVS[TG-WVS humidity correction<br/>applied when PWV is high] --> TES
 
-	TES[TES retrieval\n(NEM + MMD + LST)] --> LSTE
+	TES[TES retrieval<br/>NEM + MMD + LST] --> LSTE
 	LUTs --> TES
 	MASK --> TES
 
 	TES --> CLOUD
 	LUTs --> CLOUD
-	CLOUD[Cloud detection\n(BT-LUT + emissivity test)] --> CLOUD_OUT
+	CLOUD[Cloud detection<br/>BT-LUT + emissivity test] --> CLOUD_OUT
 
 	TES --> SST
 	GEO --> SST
 	LUTs --> SST
 	MASK --> SST
-	SST[Ocean split-window SST\n(replaces TES LST over water)] --> LSTE
+	SST[Ocean split-window SST<br/>replaces TES LST over water] --> LSTE
 
 	TES --> UQ
 	GEO --> UQ
 	LUTs --> UQ
-	UQ[Uncertainty quantification\n(LST/emissivity error + quality tiers)] --> QC
+	UQ[Uncertainty quantification<br/>LST/emissivity error + quality tiers] --> QC
 
-	LSTE[ECOv003_L2G_LSTE\n(LST + emissivity fields)]
-	CLOUD_OUT[ECOv003_L2G_CLOUD\n(cloud mask)]
-	QC[QC plane\n(error estimates + quality flags)]
+	LSTE[ECOv003_L2G_LSTE<br/>LST + emissivity fields]
+	CLOUD_OUT[ECOv003_L2G_CLOUD<br/>cloud mask]
+	QC[QC plane<br/>error estimates + quality flags]
 ```
 
 
