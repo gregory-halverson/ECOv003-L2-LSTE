@@ -208,13 +208,13 @@ If `nwpATM.tcw` is empty:
 4. Convert PPMV to g/kg with:
 
 $$
-\text{PPMV\_to\_g/kg} = \frac{1}{1000 \cdot (28.966 / 18.015)}
+k_{\mathrm{ppmv\to g/kg}} = \frac{1}{1000 \cdot (28.966 / 18.015)}
 $$
 
 5. Final TCW is:
 
 $$
-\text{TCW} = \frac{\sum dq \cdot dp \cdot \text{PPMV\_to\_g/kg}}{100 \cdot 9.8}
+\mathrm{TCW} = \frac{\sum dq \cdot dp \cdot k_{\mathrm{ppmv\to g/kg}}}{100 \cdot 9.8}
 $$
 
 ## Stage 6: Build RTTOV Grid Inputs
