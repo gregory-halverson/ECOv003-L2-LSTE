@@ -362,27 +362,105 @@ flowchart TD
 
 ### Stage 11: TES (Temperature-Emissivity Separation) Retrieval
 
-TES runs per-pixel on corrected radiance.
+The TES kernel is `apply_tes_algorithm`, executed independently per pixel after atmospheric correction is complete.
 
-#### NEM (Normalized Emissivity Method) initialization
+Inputs consumed by TES at each pixel are corrected surface radiance (`surfradi`), downwelling sky radiance (`skyr`), and runtime coefficient controls (`co_*`, `emax_*`, iteration cap). Primary outputs are `Ts`, `emisf[b]`, and QC subfields.
 
-$$R_i = L_{surf,i} - (1 - \epsilon_{max}) \cdot L_{sky,i}$$
+#### Coefficient-family selection
 
-Radiance is converted to BT by LUT; `Tnem` is the warmest channel.
+The implementation supports vegetation and bare-soil coefficient families (`co_veg`/`emax_veg` and `co_bare`/`emax_bare`). The code-level selection can be written as:
 
-#### NEM (Normalized Emissivity Method) iterative behavior
+$$
+(co, \epsilon_{max})=
+\begin{cases}
+(co_{veg}, \epsilon_{max,veg}), & gp\_water=0 \\
+(co_{bare}, \epsilon_{max,bare}), & gp\_water\neq 0
+\end{cases}
+$$
 
-Convergence rule:
+Annotation: in the current Collection-3 flow, `gp_water` is initialized to 1 and not updated in `tes_main.c`, so the bare branch is effectively used everywhere unless that logic is changed.
 
-- success when all band updates are within 0.05 radiance units after at least 3 iterations
+#### NEM (Normalized Emissivity Method) and Planck iteration (`NEM_planck`)
 
-Divergence rule:
+Pre-check validity for all processed bands:
 
-- failure when all band updates increase by more than 0.05 after at least 3 iterations
+$$
+\exists i\in\{1,\dots,n\}:\;\mathrm{isnan}(L_{surf,i})\;\lor\;\mathrm{isnan}(L_{sky,i})\;\Rightarrow\;\text{NEM failure}
+$$
 
-Timeout rule:
+Annotation: the solver exits immediately for that pixel if either surface or sky radiance is NaN in any TES band.
 
-- failure when maximum iteration count is reached without convergence
+Initialization equations:
+
+$$
+R_i^{(0)} = L_{surf,i} - (1-\epsilon_{max})\,L_{sky,i}
+$$
+
+Annotation: this is the first downwelling-corrected radiance under the maximum-emissivity assumption.
+
+$$
+T_i^{(0)} = LUT_{rad\to temp}\!\left(\frac{R_i^{(0)}}{\epsilon_{max}},\;i\right)
+$$
+
+Annotation: each initialized corrected radiance is converted to brightness temperature using the LUT, not analytic Planck inversion.
+
+$$
+T_{nem}^{(0)} = \max_i\;T_i^{(0)}
+$$
+
+Annotation: `Tnem` is always the warmest TES-channel temperature.
+
+$$
+B_i\!\left(T_{nem}^{(0)}\right)=LUT_{temp\to rad}(T_{nem}^{(0)},i),\qquad
+e_i^{(0)}=\frac{R_i^{(0)}}{B_i(T_{nem}^{(0)})}
+$$
+
+Annotation: emissivity is initialized by dividing corrected radiance by blackbody-equivalent radiance at `Tnem`.
+
+Iteration equations (for iteration index $k=1,2,\dots$):
+
+$$
+Re_i^{(k)} = L_{surf,i} - \left(1-e_i^{(k)}\right)L_{sky,i}
+$$
+
+Annotation: corrected radiance is recomputed with the current emissivity estimate.
+
+$$
+T_{e,i}^{(k)} = LUT_{rad\to temp}\!\left(\frac{Re_i^{(k)}}{e_i^{(k)}},\;i\right),\qquad
+T_{nem}^{(k)} = \max_i\;T_{e,i}^{(k)}
+$$
+
+Annotation: the updated temperature field and new `Tnem` come from LUT inversion each iteration.
+
+$$
+\Delta_i^{(k)} = Re_i^{(k)} - R_{old,i}^{(k)}
+$$
+
+Annotation: this residual is the exact convergence/divergence quantity tested in code.
+
+Convergence/divergence logic:
+
+$$
+\left(\forall i:\;|\Delta_i^{(k)}|<0.05\right)\land (k>2)\Rightarrow \text{success}
+$$
+
+$$
+\left(\forall i:\;\Delta_i^{(k)}>0.05\right)\land (k>2)\Rightarrow \text{failure (divergence)}
+$$
+
+$$
+k=it\Rightarrow \text{failure (timeout)}
+$$
+
+State update when neither stop condition is met:
+
+$$
+B_i\!\left(T_{nem}^{(k)}\right)=LUT_{temp\to rad}(T_{nem}^{(k)},i),\qquad
+e_i^{(k+1)} = \frac{Re_i^{(k)}}{B_i(T_{nem}^{(k)})},\qquad
+R_{old,i}^{(k+1)} = Re_i^{(k)}
+$$
+
+Annotation: emissivity and the previous-radiance state are advanced together at each successful iteration.
 
 #### MMD (Maximum-Minimum Difference) emissivity recovery
 
@@ -390,21 +468,79 @@ Using NEM emissivity estimate `ef`:
 
 $$bm2 = \mathrm{mean}(ef_{bands\ 2..4})$$
 
+Annotation: `bm2` is the average NEM emissivity over physical bands 2-4 (via internal mapping in both 3-band and 5-band modes).
+
 $$\beta_2[i] = \frac{ef[i]}{bm2}$$
+
+Annotation: this normalizes per-band emissivity shape relative to the bands-2..4 mean.
 
 $$MMD2 = \max(\beta_2) - \min(\beta_2)$$
 
+Annotation: `MMD2` is the spectral contrast metric driving minimum-emissivity regression.
+
 $$\epsilon_{min} = co[0] - co[1] \cdot MMD2^{co[2]}$$
+
+Annotation: regression coefficients come from the currently selected family (`co_veg` or `co_bare`).
 
 $$emisf[i] = \beta_2[i] \cdot \frac{\epsilon_{min}}{\min(\beta_2)}$$
 
-#### LST (Land Surface Temperature) retrieval
+Code-equivalent guard expression:
 
-Band 4 is always the LST reference channel:
+$$
+emisf[i]=
+\begin{cases}
+0, & (MMD2<0)\;\lor\;(n_{bm2}=0) \\
+\beta_2[i]\cdot\dfrac{\epsilon_{min}}{\min(\beta_2)}, & \text{otherwise}
+\end{cases}
+$$
+
+Annotation: the implementation explicitly zeroes emissivity if normalization is not valid.
+
+Collection-3 uses the mean of physical bands 2 through 4 (`beta2`) for this normalization, in both 3-band and 5-band modes via internal band mapping.
+
+#### LST (Land Surface Temperature) retrieval and guards
+
+Band 4 is always the temperature reference channel:
 
 $$R_{eff,c} = \frac{Reff[b_{B4}]}{emisf[b_{B4}]}$$
 
 $$Ts = LUT_{rad\to temp}(R_{eff,c}, band\ 4)$$
+
+Annotation: the code computes `R_{eff,c}` from `Reff` and solved emissivity at the band-4 compact index, then inverts the LUT to produce `Ts`.
+
+Negative-emissivity guard at the LST channel:
+
+$$
+emis2[b_{B4}]<0\Rightarrow Ts=0\;\land\;\forall i:\;emisf[i]=0
+$$
+
+Annotation: this is applied immediately after the LST solve and before downstream cloud/uncertainty refinement.
+
+TES-local QC threshold formulas:
+
+$$
+\left(\epsilon_{B4}<0.95\;\land\;\epsilon_{B5}<0.95\right)\;\lor\;t1r_{B2}<0.4
+$$
+
+Annotation: this condition drives the mandatory-state downgrade in TES QC staging.
+
+$$
+r_{sky} = \frac{L_{sky,B2}}{Y_{B2}}
+$$
+
+Annotation: $r_{sky}$ is thresholded in TES to populate sky-contamination QC bits.
+
+$$
+MMD2\in[0,\infty)
+$$
+
+Annotation: piecewise thresholds on `MMD2` (0.15, 0.1, 0.03) populate the MMD QC bit pair.
+
+Operational guardrails in the TES stage:
+
+- if NEM fails, pixel is marked not produced
+- if band-4 emissivity resolves negative, `Ts` and emissivities are zeroed for that pixel before downstream QC handling
+- TES QC subfields are populated here, with final cloud-aware and uncertainty-aware QC refinement applied in later stages
 
 TES flow:
 
