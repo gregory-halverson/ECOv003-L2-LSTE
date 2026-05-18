@@ -51,7 +51,7 @@ Running `make environment` creates a conda environment named `ECOv003-L2-LSTE` a
 
 > **Note:** There is no `environment.yml` — packages are installed directly by the `Makefile`. `make install` calls `make environment` automatically, so running them separately is optional.
 
-### RTTOV
+### RTTOV (Radiative Transfer for TOVS)
 
 This software requires the Radiative Transfer for TOVS (RTTOV) radiative transfer model for atmospheric correction. 
 
@@ -245,11 +245,11 @@ Startup sequence:
 2. Read geolocation (and Collection 2 GEO path when applicable).
 3. Compute granule lat/lon extrema for NWP crop bounds.
 
-### Stage 3: Optional ASTER GED Ingest
+### Stage 3: Optional ASTER GED (Global Emissivity Dataset) Ingest
 
 When TG/WVS is enabled, ASTER GED emissivity is loaded over the granule footprint and used by the `Tg` branch. If disabled, ASTER ingestion is skipped.
 
-### Stage 4: NWP Normalization
+### Stage 4: NWP (Numerical Weather Prediction) Normalization
 
 NWP path is selected from configured source key (MERRA/GEOS/NCEP/ECMWF). Operational behavior includes source-dependent interpolation/cropping and field clamping.
 
@@ -261,7 +261,7 @@ Integrated TCW estimate:
 
 $$\mathrm{TCW} = \frac{\sum dq \cdot dp \cdot k_{\mathrm{ppmv\to g/kg}}}{100 \cdot 9.8}$$
 
-### Stage 5: RTTOV Grid Preparation
+### Stage 5: RTTOV (Radiative Transfer for TOVS) Grid Preparation
 
 1. Build 2-D NWP lat/lon meshes.
 2. Crop NWP fields to granule extent with margin (except GEOS pre-cropped path).
@@ -269,7 +269,7 @@ $$\mathrm{TCW} = \frac{\sum dq \cdot dp \cdot k_{\mathrm{ppmv\to g/kg}}}{100 \cd
 4. Map granule geometry to cropped NWP grid (nearest-neighbor remap).
 5. Choose RTTOV skin-temperature input (`skt` if available, else lowest atmospheric level).
 
-### Stage 6: RTTOV Profile Packing
+### Stage 6: RTTOV (Radiative Transfer for TOVS) Profile Packing
 
 Atmospheric arrays are reshaped into the binary profile format expected by RTTOV:
 
@@ -278,7 +278,7 @@ Atmospheric arrays are reshaped into the binary profile format expected by RTTOV
 - enforce positivity where RTTOV requires it
 - apply required ordering/transposition for RTTOV interface
 
-### Stage 7: RTTOV Execution
+### Stage 7: RTTOV (Radiative Transfer for TOVS) Execution
 
 Pass 1 (always):
 
@@ -292,7 +292,7 @@ Pass 2 (TG/WVS only):
 2. Re-run RTTOV wrapper.
 3. Read second output set.
 
-### Stage 8: Interpolate RTTOV Outputs To Granule
+### Stage 8: Interpolate RTTOV (Radiative Transfer for TOVS) Outputs To Granule
 
 RTTOV coarse-grid fields are bilinearly interpolated to the granule grid:
 
@@ -304,7 +304,7 @@ RTTOV coarse-grid fields are bilinearly interpolated to the granule grid:
 
 If first-pass transmittance is non-positive everywhere, processing aborts for the granule.
 
-### Stage 9: LUT Services
+### Stage 9: LUT (Look-Up Table) Services
 
 A 6-column radiance/temperature LUT is loaded and used for all BT/radiance conversions:
 
@@ -317,11 +317,11 @@ No analytic Planck expression is used in final operational retrieval; LUT conver
 
 ### Stage 10: Surface Radiance Correction
 
-#### Standard branch (no TG/WVS)
+#### Standard branch (no TG/WVS — Temperature-Gradient / Water Vapor Scaling)
 
 $$L_{surf} = \frac{Y - pathr}{t1r}$$
 
-#### TG/WVS branch
+#### TG/WVS (Temperature-Gradient / Water Vapor Scaling) branch
 
 TG/WVS computes per-band `Tg`, converts to blackbody-equivalent radiance `B`, then derives gamma factors used to blend pass-1 and pass-2 RTTOV states.
 
@@ -360,17 +360,17 @@ flowchart TD
 	F --> G[Reset cloudy pixels to gi = 1]
 ```
 
-### Stage 11: TES Retrieval
+### Stage 11: TES (Temperature-Emissivity Separation) Retrieval
 
 TES runs per-pixel on corrected radiance.
 
-#### NEM initialization
+#### NEM (Normalized Emissivity Method) initialization
 
 $$R_i = L_{surf,i} - (1 - \epsilon_{max}) \cdot L_{sky,i}$$
 
 Radiance is converted to BT by LUT; `Tnem` is the warmest channel.
 
-#### NEM iterative behavior
+#### NEM (Normalized Emissivity Method) iterative behavior
 
 Convergence rule:
 
@@ -384,7 +384,7 @@ Timeout rule:
 
 - failure when maximum iteration count is reached without convergence
 
-#### MMD emissivity recovery
+#### MMD (Maximum-Minimum Difference) emissivity recovery
 
 Using NEM emissivity estimate `ef`:
 
@@ -398,7 +398,7 @@ $$\epsilon_{min} = co[0] - co[1] \cdot MMD2^{co[2]}$$
 
 $$emisf[i] = \beta_2[i] \cdot \frac{\epsilon_{min}}{\min(\beta_2)}$$
 
-#### LST retrieval
+#### LST (Land Surface Temperature) retrieval
 
 Band 4 is always the LST reference channel:
 
@@ -437,7 +437,7 @@ $$EmisWB = c_0 + \sum_b c_b \cdot emisf[b]$$
 
 Coefficient vectors differ for 3-band and 5-band modes.
 
-### Stage 14: Uncertainty And QC Refinement
+### Stage 14: Uncertainty And QC (Quality Control) Refinement
 
 Per-band emissivity uncertainty:
 
@@ -465,7 +465,7 @@ QC bit groups used in this implementation:
 
 Missing scan flags from L1 data quality (`DataQ`) affect both QC and uncertainty inflation terms.
 
-### Stage 15: SST Retrieval
+### Stage 15: SST (Sea Surface Temperature) Retrieval
 
 SST coefficients are loaded from monthly and 6-hourly LUT files:
 
