@@ -109,44 +109,14 @@ make install
 
 ```mermaid
 flowchart TD
-	subgraph Inputs
-		L1CG[ECOSTRESS L1CG TOA radiance]
-		NWP[NWP profiles<br/>temp, WV, pressure, skin temp]
-		ASTER[ASTER GED emissivity / NDVI]
-		LUTs[Algorithm LUTs<br/>Planck, cloud BT, SST coeffs, uncertainty coeffs]
-		GEO[Geolocation / viewing geometry]
-		MASK[Land-water / snow masks]
-	end
-
-	L1CG --> AC
-	NWP --> AC
-	GEO --> AC
-	AC[Atmospheric Correction<br/>RTTOV] --> WVS
-	ASTER --> WVS
-	WVS[TG-WVS humidity correction<br/>applied when PWV is high] --> TES
-
-	TES[TES retrieval<br/>NEM + MMD + LST] --> LSTE
-	LUTs --> TES
-	MASK --> TES
-
-	TES --> CLOUD
-	LUTs --> CLOUD
-	CLOUD[Cloud detection<br/>BT-LUT + emissivity test] --> CLOUD_OUT
-
-	TES --> SST
-	GEO --> SST
-	LUTs --> SST
-	MASK --> SST
-	SST[Ocean split-window SST<br/>reported as companion SST field] --> LSTE
-
-	TES --> UQ
-	GEO --> UQ
-	LUTs --> UQ
-	UQ[Uncertainty quantification<br/>LST/emissivity error + quality tiers] --> QC
-
-	LSTE[ECOv003_L2G_LSTE<br/>LST + emissivity fields]
-	CLOUD_OUT[ECOv003_L2G_CLOUD<br/>cloud mask]
-	QC[QC plane<br/>error estimates + quality flags]
+	A[Stage 1-2<br/>Runtime config + L1 ingest] --> B[Stage 3-4<br/>ASTER optional + NWP normalization]
+	B --> C[Stage 5-8<br/>RTTOV prep, run, interpolate]
+	C --> D[Stage 9-10<br/>LUT services + surface radiance correction]
+	D --> E[Stage 11<br/>TES retrieval]
+	E --> F[Stage 12-14<br/>Cloud integration + EmisWB + uncertainty and QC]
+	F --> G[Stage 15-16<br/>SST retrieval + packing and writeout]
+	G --> LSTE[ECOv003_L2G_LSTE<br/>LST, SST, emissivity, uncertainty, QC]
+	F --> CLOUD_OUT[ECOv003_L2G_CLOUD<br/>cloud mask]
 ```
 
 This section is an implementation-level specification of the Collection 3 processing flow centered on `src/tes_main.c`, including branching logic, variable semantics, formulas, and output conventions.
@@ -160,33 +130,6 @@ The algorithm section covers:
 3. Product augmentation: cloud integration, SST retrieval path, uncertainty model, QC flags.
 
 The section assumes helper functions are available for ASTER GED ingestion, NWP readers, interpolation, smoothing, and cloud generation.
-
-### Processing Pipeline
-
-```mermaid
-flowchart TD
-	A[Parse run config and runtime parameters] --> B[Read L1 radiance and geometry]
-	B --> C[Determine thermal band set: 3-band or 5-band]
-	C --> D[Optional ASTER GED emissivity load for TG/WVS]
-	D --> E[Read and preprocess NWP atmosphere]
-	E --> F[Crop/map NWP fields onto RTTOV grid]
-	F --> G[Run RTTOV pass 1]
-	G --> H{TG/WVS enabled?}
-	H -- Yes --> I[Run RTTOV pass 2 with humidity scaled by 0.7]
-	H -- No --> J[Skip second RTTOV pass]
-	I --> K[Interpolate RTTOV outputs to granule]
-	J --> K
-	K --> L{TG/WVS enabled?}
-	L -- Yes --> M[Compute Tg, gamma, smoothed gi, corrected radiance]
-	L -- No --> N[Compute standard corrected radiance]
-	M --> O[Run TES retrieval]
-	N --> O
-	O --> P[Generate cloud product and ingest final cloud mask]
-	P --> Q[Compute emissivity wideband, uncertainty, QC refinements]
-	Q --> R[Compute SST]
-	R --> S[Scale/pack datasets]
-	S --> T[Write LSTE product, CLOUD product, metadata, sidecars]
-```
 
 ### Key Inputs And Outputs
 
@@ -360,201 +303,379 @@ flowchart TD
 	F --> G[Reset cloudy pixels to gi = 1]
 ```
 
-### Stage 11: TES (Temperature-Emissivity Separation) Retrieval
+# Stage 11: Temperature-Emissivity Separation (TES) Retrieval
 
-The TES kernel is `apply_tes_algorithm`, executed independently per pixel after atmospheric correction is complete.
+## 1. Architectural Overview & Context
 
-Inputs consumed by TES at each pixel are corrected surface radiance (`surfradi`), downwelling sky radiance (`skyr`), and runtime coefficient controls (`co_*`, `emax_*`, iteration cap). Primary outputs are `Ts`, `emisf[b]`, and QC subfields.
+The Temperature-Emissivity Separation (TES) algorithm is the definitive core retrieval stage of the thermal infrared processing pipeline. Operating independently on a per-pixel basis, this stage consumes surface and sky radiances that have undergone atmospheric attenuation correction. It breaks the mathematical underdetermination inherent in thermal remote sensing—where an $N$-channel sensor observes $N+1$ unknowns ($N$ spectral emissivities plus 1 surface temperature)—by utilizing empirical relationships derived from natural spectral variation.
 
-#### Coefficient-family selection
+The algorithm can execute in either a standard direct correction mode or an optimized water vapor scaling (WVS) mode that resolves residual boundary layer mismatches. It dynamically accommodates variations in instrument channel configurations (e.g., 3-band versus 5-band payloads) through virtualized index mapping.
 
-The implementation supports vegetation and bare-soil coefficient families (`co_veg`/`emax_veg` and `co_bare`/`emax_bare`). The code-level selection can be written as:
+---
 
-$$
-(co, \epsilon_{max})=
+## 2. Interface Definitions (Inputs & Outputs)
+
+An implementation must guarantee access to the following uniform grid spaces and configuration fields. Dimensions are structured as $[B \times L \times P]$ where $B$ represents the configured channel count, $L$ represents grid lines, and $P$ represents line pixels.
+
+### Primary Input Datasets
+
+| Identifier | Description | Data Type | Physical Units / Range | Dimension |
+| --- | --- | --- | --- | --- |
+| `Y` | Observed top-of-atmosphere total radiance spectrum | Float64 | $\mathrm{W \cdot m^{-2} \cdot sr^{-1} \cdot \mu m^{-1}}$ | $[B \times L \times P]$ |
+| `L_sky` | Downwelling atmospheric sky radiance spectrum | Float64 | $\mathrm{W \cdot m^{-2} \cdot sr^{-1} \cdot \mu m^{-1}}$ | $[B \times L \times P]$ |
+| `t1` | Upwelling atmospheric path transmittance | Float64 | 0.0 to 1.0 | $[B \times L \times P]$ |
+| `t2` | Secondary scaled atmospheric transmittance (WVS Mode) | Float64 | 0.0 to 1.0 | $[B \times L \times P]$ |
+| `L_path` | Upwelling atmospheric path radiance | Float64 | $\mathrm{W \cdot m^{-2} \cdot sr^{-1} \cdot \mu m^{-1}}$ | $[B \times L \times P]$ |
+| `PWV` | Total column precipitable water vapor | Float64 | $\mathrm{g \cdot cm^{-2}}$ or **cm** | $[L \times P]$ |
+| `SVA` | Sensor viewing angle | Float64 | 0.0 to 90.0 degrees | $[L \times P]$ |
+| `surface_mask` | Surface boundary type indicator (0 = land, 1 = water) | UInt8 | Enumerated Flag | $[L \times P]$ |
+| `data_quality` | Input scan line diagnostic array per channel | Int32 | 0 = Nominal, $\ge 1$ = Anomalous/Filled | $[B \times L \times P]$ |
+
+### Primary Output Datasets
+
+| Identifier | Description | Data Type | Physical Units / Scale | Dimension |
+| --- | --- | --- | --- | --- |
+| `Ts` | Derived Land Surface Temperature (LST) | UInt16 | Scale: 0.02, Offset: 0.0 (**K**) | $[L \times P]$ |
+| `emisf` | Solved Surface Emissivity spectrum | UInt8 | Scale: 0.002, Offset: 0.49 | $[B \times L \times P]$ |
+| `EmisWB` | Derived wide-band structural emissivity | UInt8 | Scale: 0.002, Offset: 0.49 | $[L \times P]$ |
+| `dT` | Propagated temperature uncertainty estimate | UInt8 | Scale: 0.04, Offset: 0.0 (**K**) | $[L \times P]$ |
+| `de` | Propagated emissivity uncertainty spectrum | UInt16 | Scale: 1.0e-4, Offset: 0.0 | $[B \times L \times P]$ |
+| `QC` | 16-bit packed quality control flag array | UInt16 | Bitwise Bitmask Fields | $[L \times P]$ |
+
+### Global Runtime Configuration Parameters
+
+* `run_tgwvs`: Boolean flag enabling or disabling the multi-pass Water Vapor Scaling extension loop.
+* `it`: Integer parameter defining the absolute iteration timeout threshold for the Planck numerical engine (Default: 13).
+* `emax_veg` / `emax_bare`: Empirical ceiling limits for maximum emissivity initialization (Defaults: 0.985 / 0.970).
+* `co_veg` / `co_bare`: Array coefficients $[c_0, c_1, c_2]$ mapping spectral contrast to empirical minima regression.
+* `emis_wb_coeffs`: Channel blending coefficients utilized to compile broadband emissivity.
+* `xe`: Sub-matrix array storing channel-specific coefficients for spectral emissivity error estimation.
+* `xt`: Array coefficients mapping environmental parameters to temperature retrieval uncertainty.
+
+---
+
+## 3. Preprocessing & Configuration Staging
+
+### Virtualized Channel Mapping
+
+To accommodate multi-instrument cross-compatibility, raw payload bands must map to an abstract zero-indexed compilation layout of length $N$. Reference tracking variables establish structural access:
+
+* **5-Band Mode:** Mapped directly $[B_1 \to 0, B_2 \to 1, B_3 \to 2, B_4 \to 3, B_5 \to 4]$. $N = 5$.
+* **3-Band Mode:** Mapped selectively to compact array slots $[B_2 \to 0, B_4 \to 1, B_5 \to 2]$. Channels $B_1$ and $B_3$ are treated as unpopulated dummy spans. $N = 3$.
+
+Regardless of mode complexity, specific physical reference points remain fixed to their relative spectral channels:
+
+* **The Temperature Reference Channel ($b_{LST}$):** Statically tracked to physical band $B_4$ (Internal compact index 3 in 5-band mode, index 1 in 3-band mode).
+* **The Normalization Range:** Shape validation and mean spectral calculations default to tracking data slices correlating to physical bands $B_2$ through $B_4$.
+
+### Coefficient Selection
+
+For every grid point, surface classifications drive the selection of standard baseline variables. If the runtime system configuration does not update the `surface_mask` plane, the execution baseline safely falls back to the bare-soil spectrum family across the entire workspace:
+
+$$(co, \epsilon_{max})=
 \begin{cases}
-(co_{veg}, \epsilon_{max,veg}), & gp\_water=0 \\
-(co_{bare}, \epsilon_{max,bare}), & gp\_water\neq 0
-\end{cases}
-$$
+(co_{veg}, \epsilon_{max,veg}), & \text{surface\_mask} = 0 \\
+(co_{bare}, \epsilon_{max,bare}), & \text{surface\_mask} \neq 0
+\end{cases}$$
 
-Annotation: in the current Collection-3 flow, `gp_water` is initialized to 1 and not updated in `tes_main.c`, so the bare branch is effectively used everywhere unless that logic is changed.
+---
 
-#### NEM (Normalized Emissivity Method) and Planck iteration (`NEM_planck`)
+## 4. Atmospheric Refinement & Correction Core
 
-Pre-check validity for all processed bands:
-
-$$
-\exists i\in\{1,\dots,n\}:\;\mathrm{isnan}(L_{surf,i})\;\lor\;\mathrm{isnan}(L_{sky,i})\;\Rightarrow\;\text{NEM failure}
-$$
-
-Annotation: the solver exits immediately for that pixel if either surface or sky radiance is NaN in any TES band.
-
-Initialization equations:
-
-$$
-R_i^{(0)} = L_{surf,i} - (1-\epsilon_{max})\,L_{sky,i}
-$$
-
-Annotation: this is the first downwelling-corrected radiance under the maximum-emissivity assumption.
-
-$$
-T_i^{(0)} = LUT_{rad\to temp}\!\left(\frac{R_i^{(0)}}{\epsilon_{max}},\;i\right)
-$$
-
-Annotation: each initialized corrected radiance is converted to brightness temperature using the LUT, not analytic Planck inversion.
-
-$$
-T_{nem}^{(0)} = \max_i\;T_i^{(0)}
-$$
-
-Annotation: `Tnem` is always the warmest TES-channel temperature.
-
-$$
-B_i\!\left(T_{nem}^{(0)}\right)=LUT_{temp\to rad}(T_{nem}^{(0)},i),\qquad
-e_i^{(0)}=\frac{R_i^{(0)}}{B_i(T_{nem}^{(0)})}
-$$
-
-Annotation: emissivity is initialized by dividing corrected radiance by blackbody-equivalent radiance at `Tnem`.
-
-Iteration equations (for iteration index $k=1,2,\dots$):
-
-$$
-Re_i^{(k)} = L_{surf,i} - \left(1-e_i^{(k)}\right)L_{sky,i}
-$$
-
-Annotation: corrected radiance is recomputed with the current emissivity estimate.
-
-$$
-T_{e,i}^{(k)} = LUT_{rad\to temp}\!\left(\frac{Re_i^{(k)}}{e_i^{(k)}},\;i\right),\qquad
-T_{nem}^{(k)} = \max_i\;T_{e,i}^{(k)}
-$$
-
-Annotation: the updated temperature field and new `Tnem` come from LUT inversion each iteration.
-
-$$
-\Delta_i^{(k)} = Re_i^{(k)} - R_{old,i}^{(k)}
-$$
-
-Annotation: this residual is the exact convergence/divergence quantity tested in code.
-
-Convergence/divergence logic:
-
-$$
-\left(\forall i:\;|\Delta_i^{(k)}|<0.05\right)\land (k>2)\Rightarrow \text{success}
-$$
-
-$$
-\left(\forall i:\;\Delta_i^{(k)}>0.05\right)\land (k>2)\Rightarrow \text{failure (divergence)}
-$$
-
-$$
-k=it\Rightarrow \text{failure (timeout)}
-$$
-
-State update when neither stop condition is met:
-
-$$
-B_i\!\left(T_{nem}^{(k)}\right)=LUT_{temp\to rad}(T_{nem}^{(k)},i),\qquad
-e_i^{(k+1)} = \frac{Re_i^{(k)}}{B_i(T_{nem}^{(k)})},\qquad
-R_{old,i}^{(k+1)} = Re_i^{(k)}
-$$
-
-Annotation: emissivity and the previous-radiance state are advanced together at each successful iteration.
-
-#### MMD (Maximum-Minimum Difference) emissivity recovery
-
-Using NEM emissivity estimate `ef`:
-
-$$bm2 = \mathrm{mean}(ef_{bands\ 2..4})$$
-
-Annotation: `bm2` is the average NEM emissivity over physical bands 2-4 (via internal mapping in both 3-band and 5-band modes).
-
-$$\beta_2[i] = \frac{ef[i]}{bm2}$$
-
-Annotation: this normalizes per-band emissivity shape relative to the bands-2..4 mean.
-
-$$MMD2 = \max(\beta_2) - \min(\beta_2)$$
-
-Annotation: `MMD2` is the spectral contrast metric driving minimum-emissivity regression.
-
-$$\epsilon_{min} = co[0] - co[1] \cdot MMD2^{co[2]}$$
-
-Annotation: regression coefficients come from the currently selected family (`co_veg` or `co_bare`).
-
-$$emisf[i] = \beta_2[i] \cdot \frac{\epsilon_{min}}{\min(\beta_2)}$$
-
-Code-equivalent guard expression:
-
-$$
-emisf[i]=
-\begin{cases}
-0, & (MMD2<0)\;\lor\;(n_{bm2}=0) \\
-\beta_2[i]\cdot\dfrac{\epsilon_{min}}{\min(\beta_2)}, & \text{otherwise}
-\end{cases}
-$$
-
-Annotation: the implementation explicitly zeroes emissivity if normalization is not valid.
-
-Collection-3 uses the mean of physical bands 2 through 4 (`beta2`) for this normalization, in both 3-band and 5-band modes via internal band mapping.
-
-#### LST (Land Surface Temperature) retrieval and guards
-
-Band 4 is always the temperature reference channel:
-
-$$R_{eff,c} = \frac{Reff[b_{B4}]}{emisf[b_{B4}]}$$
-
-$$Ts = LUT_{rad\to temp}(R_{eff,c}, band\ 4)$$
-
-Annotation: the code computes `R_{eff,c}` from `Reff` and solved emissivity at the band-4 compact index, then inverts the LUT to produce `Ts`.
-
-Negative-emissivity guard at the LST channel:
-
-$$
-emis2[b_{B4}]<0\Rightarrow Ts=0\;\land\;\forall i:\;emisf[i]=0
-$$
-
-Annotation: this is applied immediately after the LST solve and before downstream cloud/uncertainty refinement.
-
-TES-local QC threshold formulas:
-
-$$
-\left(\epsilon_{B4}<0.95\;\land\;\epsilon_{B5}<0.95\right)\;\lor\;t1r_{B2}<0.4
-$$
-
-Annotation: this condition drives the mandatory-state downgrade in TES QC staging.
-
-$$
-r_{sky} = \frac{L_{sky,B2}}{Y_{B2}}
-$$
-
-Annotation: $r_{sky}$ is thresholded in TES to populate sky-contamination QC bits.
-
-$$
-MMD2\in[0,\infty)
-$$
-
-Annotation: piecewise thresholds on `MMD2` (0.15, 0.1, 0.03) populate the MMD QC bit pair.
-
-Operational guardrails in the TES stage:
-
-- if NEM fails, pixel is marked not produced
-- if band-4 emissivity resolves negative, `Ts` and emissivities are zeroed for that pixel before downstream QC handling
-- TES QC subfields are populated here, with final cloud-aware and uncertainty-aware QC refinement applied in later stages
-
-TES flow:
+Depending on runtime system controls, inputs route through one of two correction tracks to calculate the adjusted surface radiance grid ($L_{surf}$):
 
 ```mermaid
 flowchart TD
-	A[Validate corrected radiance inputs] --> B[Select coefficient family and emax]
-	B --> C[Run NEM_planck]
-	C --> D{NEM success?}
-	D -- No --> E[Mark pixel not produced]
-	D -- Yes --> F[Compute beta2 and MMD2]
-	F --> G[Recover emissivity spectrum]
-	G --> H[Convert band-4 corrected radiance to LST]
-	H --> I[Update QC subfields]
+    Q{Is run_tgwvs enabled?}
+    Q -- Yes --> WVS[Water Vapor Scaling Track<br/>Compute Tg via LUT<br/>Compute gamma terms and ratios<br/>Apply 2D spatial smoothing<br/>Derive WVS-scaled ti parameters<br/>Compute L_surf = (Y - L_pathi) / ti]
+    Q -- No --> DIR[Direct Correction Track<br/>Compute L_surf = (Y - L_path) / t1]
 ```
+
+### Track A: Direct Correction Mode (`run_tgwvs = false`)
+
+Surface radiances derive explicitly from a single-pass extraction of upwelling path parameters:
+
+$$L_{surf,i} = \frac{Y_i - L_{path,i}}{t_{1,i}}$$
+
+If $L_{surf,i} < 0.0$, the spectrum at that coordinate is flagged as invalid and assigned NaN.
+
+### Track B: Water Vapor Scaling Mode (`run_tgwvs = true`)
+
+1. **First-Pass Temperature Approximation ($T_g$):** Extracted using empirical coefficient parameters linked to raw channel groupings, tracking diurnal variations against localized day/night flags.
+2. **First-Pass Radiance Mapping ($B_i$):** Derived by processing $T_g$ directly into brightness equivalent fields via Look-Up Table (LUT) conversion:
+$$B_i = \mathrm{LUT}_{temp \to rad}(T_g, i)$$
+
+
+3. **Scaling Term Computations ($\gamma_i$):** Calculated for each channel to locate scaling factors:
+$$\gamma_i = \frac{\ln\left(\frac{t_{2,i}}{t_{1,i}^{\alpha}}\right)}{\ln(t_{1,i})}, \quad \text{where } \alpha = 0.7^{\beta_i}$$
+
+
+$$\text{Numerator}_i = B_i - \frac{L_{path,i}}{1.0 - t_{1,i}}, \quad \text{Denominator}_i = Y_i - \frac{L_{path,i}}{1.0 - t_{1,i}}$$
+
+
+$$g_i = \frac{\ln\left(\frac{t_{2,i}}{t_{1,i}^{\alpha}} \cdot \left[\frac{\text{Numerator}_i}{\text{Denominator}_i}\right]^{1.0 - \alpha}\right)}{\ln(t_{1,i})}$$
+
+
+If logarithmic structures produce complex results, the corresponding grid point resets to a baseline of $1.0$.
+4. **Spatial Boundary Smoothing:** Ground configurations map bare grid spaces directly to the physical reference channel's scale ($g_i = g_{B5}$). The composite arrays scale between boundaries $-2.0$ and $3.0$, and pass through a two-dimensional spatial box-car filter over scale lengths specified by atmospheric moisture levels.
+5. **Final Radiance Reconstruction:** Cloud spaces reset scaling multipliers back to unity ($\gamma_i = 1.0$). Refined transmittances ($t_{i}$) and path radiances ($L_{path,i}$) are calculated to output the corrected surface radiance spectrum ($L_{surf}$):
+$$t_{i} = t_{1,i}^{\frac{\gamma_i - \alpha}{1.0 - \alpha}} \cdot t_{2,i}^{\frac{1.0 - \gamma_i}{1.0 - \alpha}}$$
+
+
+$$L_{path,i} = L_{path,i} \cdot \left(\frac{1.0 - t_{i}}{1.0 - t_{1,i}}\right)$$
+
+
+$$L_{surf,i} = \frac{Y_i - L_{path,i}}{t_{i}}$$
+
+
+
+---
+
+## 5. Core Retrieval Solver (NEM-Planck Engine)
+
+The Normalized Emissivity Method (NEM) module executes iteratively for every valid pixel spatial coordinate.
+
+```mermaid
+flowchart TD
+    Start[Initialize Pixel Retrieval] --> CheckNaN{Is NaN present in\n L_surf or L_sky?}
+    CheckNaN -- Yes --> MarkFail[Flag Pixel as\n Not Produced in QC] --> End[Exit Pixel Loop]
+    CheckNaN -- No --> InitRad[Compute Initial Corrected Radiance\n R_i^(0) via emax Ceilings]
+    InitRad --> InitTemp[Derive Channel Temperatures T_i^(0)\n Seek Max T_nem^(0)]
+    InitTemp --> Loop[Enter Iteration Loop: k = 1 to it]
+    Loop --> LoopCeil{Is k == it?\n Timeout Ceil}
+    LoopCeil -- Yes --> MarkFail
+    LoopCeil -- No --> IterRad[Compute Iterative Radiance Spectrum\n Re_i^(k) using current e_i]
+    IterRad --> IterTemp[Invert Radiance via LUT\n Seek Max T_nem^(k)]
+    IterTemp --> CalcDelta[Compute Channel Residuals\n Delta_i = Re_i - R_old]
+    CalcDelta --> CheckConverge{Are ALL Channel Residuals\n |Delta_i| < 0.05 AND k > 2?}
+    CheckConverge -- Yes --> OutSuccess[Output Solved Matrix State] --> End
+    CheckConverge -- No --> CheckDiverge{Are ALL Channel Residuals\n Delta_i > 0.05 AND k > 2?}
+    CheckDiverge -- Yes --> MarkFail
+    CheckDiverge -- No --> UpdateEmis[Update Emissivity Track\n e_i = Re_i / B_i] --> LoopNext[Advance: k = k + 1] --> Loop
+
+```
+
+### Numerical Mathematical Sequence
+
+1. **Environmental Data Validation:**
+If any channel structural slice contains a NaN parameter, the solver exits immediately, flagging the pixel within the quality array mask:
+$$\exists i \in \{1, \dots, N\} : \mathrm{isnan}(L_{surf,i}) \lor \mathrm{isnan}(L_{sky,i}) \Rightarrow \text{Abort Initialization}$$
+
+
+2. **Radiances Initialization:**
+Corrected radiances are initialized by applying the chosen maximum emissivity ceiling across all channels:
+$$R_i^{(0)} = L_{surf,i} - (1.0 - \epsilon_{max}) L_{sky,i}$$
+
+
+3. **Temperature Bounds Extraction:**
+Each calculated initialization radiance transforms into localized temperature spaces using the lookup structure:
+$$T_i^{(0)} = \mathrm{LUT}_{rad \to temp}\left(\frac{R_i^{(0)}}{\epsilon_{max}}, \; i\right)$$
+
+
+The localized baseline temperature maximum targets the warmest available path channel:
+$$T_{nem}^{(0)} = \max_i \; T_i^{(0)}$$
+
+
+4. **Iterative Loops Track Calculation ($k = 1, 2, \dots, it$):**
+* **Blackbody Equivalence Transformation:**
+$$B_i = \mathrm{LUT}_{temp \to rad}\left(T_{nem}^{(k-1)}, \; i\right)$$
+
+
+* **Emissivity Matrix Estimation:**
+$$e_i^{(k)} = \frac{R_i^{(k-1)}}{B_i}$$
+
+
+* **Radiance Recalculation:**
+$$Re_i^{(k)} = L_{surf,i} - \left(1.0 - e_i^{(k)}\right) L_{sky,i}$$
+
+
+* **Residual Delta Evaluation:**
+The numerical convergence distance tracks changes in radiance balances over time:
+$$\Delta_i^{(k)} = Re_i^{(k)} - R_{old,i}, \quad \text{where } R_{old,i} = R_i^{(k-1)}$$
+
+
+* **Termination Control Verification:**
+* **Convergence Match (Success):**
+$$\left(\forall i : |\Delta_i^{(k)}| < 0.05\right) \land (k > 2) \Rightarrow \text{Halt Engine (Output State Solved)}$$
+
+
+* **Divergence Escape (Failure Run):**
+$$\left(\forall i : \Delta_i^{(k)} > 0.05\right) \land (k > 2) \Rightarrow \text{Halt Engine (Flag Retrieval Fault)}$$
+
+
+* **Timeout Limit (Failure Timeout):**
+$$k = it \Rightarrow \text{Halt Engine (Flag Loop Timeout)}$$
+
+
+
+
+* **State Vector Updates:**
+If none of the termination criteria are met, temperatures recalculate across all channels to prepare for the next iteration step:
+$$T_{e,i}^{(k)} = \mathrm{LUT}_{rad \to temp}\left(\frac{Re_i^{(k)}}{e_i^{(k)}}, \; i\right), \quad T_{nem}^{(k)} = \max_i \; T_{e,i}^{(k)}$$
+
+
+
+
+
+---
+
+## 6. Spectral Recovery (MMD Regression)
+
+Following a successful exit from the NEM block, the resolved final iteration emissivity vector ($e_{f}$) updates natural variance records through Maximum-Minimum Difference (MMD) structural matching.
+
+### Channel Averaging Boundaries
+
+The system calculates a mean value over the compact channels mapped to physical bands $B_2$ through $B_4$:
+
+$$bm2 = \frac{1}{M} \sum_{j \in \{B2 \dots B4\}} e_{f,j}$$
+
+Where $M$ represents the count of valid non-NaN channels located inside the targeted extraction window bounds.
+
+### Beta Spectrum Normalization
+
+The baseline emissivity values are normalized to remove temperature scaling variances while preserving the structural spectral shape:
+
+$$\beta_2[i] = \frac{e_{f,i}}{bm2}$$
+
+The spectral contrast metric derives from the scaled spectrum boundaries:
+
+$$MMD2 = \max(\beta_2) - \min(\beta_2)$$
+
+### Minimum Emissivity Calculation & Final Mapping
+
+The structural contrast scales via empirical power regressions to determine the minimum expected emissivity ($\epsilon_{min}$):
+
+$$\epsilon_{min} = co[0] - co[1] \cdot MMD2^{co[2]}$$
+
+The final retrieved emissivity spectrum array (`emisf`) is reconstructed by scaling the normalized beta values relative to this calculated minimum:
+
+$$\mathrm{emisf}[i] = \beta_2[i] \cdot \frac{\epsilon_{min}}{\min(\beta_2)}$$
+
+### Mathematical Validation Guardrails
+
+To prevent empirical calculation errors or arithmetic division faults, explicit array verification guards check the calculated parameters:
+
+$$\mathrm{emisf}[i]=
+\begin{cases}
+0.0, & (MMD2 < 0.0) \lor (M = 0) \\
+\beta_2[i] \cdot \frac{\epsilon_{min}}{\min(\beta_2)}, & \text{otherwise}
+\end{cases}$$
+
+---
+
+## 7. Surface Temperature Derivation & Security Guards
+
+The final Land Surface Temperature (LST) calculation relies on values extracted from the reference channel ($B_4$).
+
+### Temperature Transformation Inversion
+
+1. **Effective Radiance Extraction:** The final corrected radiance at the target reference channel index ($b_{B4}$) is derived from the calculated values:
+$$R_{eff,c} = \frac{Reff[b_{B4}]}{\mathrm{emisf}[b_{B4}]}$$
+
+
+2. **LST Resolution Inversion:** The effective radiance is passed through the temperature inversion lookup tables to determine the final land surface temperature value ($T_s$):
+$$T_s = \mathrm{LUT}_{rad \to temp}(R_{eff,c}, \; b_{B4})$$
+
+
+
+### Output Field Validation Guards
+
+If a pixel produces anomalous calculation states or unphysical negative emissivity balances at the reference channel boundary, the processing core overrides the localized matrix coordinates to zero out the outputs, preventing corrupted values from propagating downstream:
+
+$$\mathrm{emis2}[b_{B4}] < 0.0 \Rightarrow T_s = 0.0 \;\land\; \forall i \in \{1 \dots N\} : \mathrm{emisf}[i] = 0.0$$
+
+---
+
+## 8. Uncertainty Propagation & Quality Control Staging
+
+### Error Estimation Computations
+
+Localized uncertainty arrays for temperature and emissivity propagate errors externally by referencing environmental variables extracted from the precipitable water vapor (`PWV`) and sensor viewing angle (`SVA`) grid metrics:
+
+$$\Delta \epsilon_i = xe[i][0] + xe[i][1] \cdot \mathrm{PWV} + xe[i][2] \cdot \mathrm{PWV}^2$$
+
+$$\Delta T_s = xt[0] + xt[1] \cdot \mathrm{PWV} + xt[2] \cdot \mathrm{SVA}$$
+
+The mean structural error tracks variations across the available spectrum bands:
+
+$$\Delta \epsilon_{mean} = \sqrt{\frac{1}{N} \sum_{i=1}^N (\Delta \epsilon_i)^2}$$
+
+### Bitwise Quality Control Array Mapping
+
+The output variable `QC` maps diagnostic tracking fields into a single packed 16-bit word structural container via bitwise operations:
+
+| Bit Allocation Spans | Diagnostic Meaning / Logic Conditions | Flag States Encoding Definitions |
+| --- | --- | --- |
+| **Bits 0 – 1**<br>
+
+<br>*(Mandatory QA)* | Core operational summary tracking pixel readiness states. | `00` = High Quality Produced<br>
+
+<br>`01` = Nominal Quality Produced<br>
+
+<br>`10` = Cloud Covered Pixel Track<br>
+
+<br>`11` = Missing Input / Not Produced |
+| **Bits 2 – 3**<br>
+
+<br>*(Data Missing)* | Input raw data structural validity tracking fields. | `00` = All bands nominal input baseline<br>
+
+<br>`01` = Missing scans present but reconstructed via models<br>
+
+<br>`10` = Missing scan gaps could not be reconstructed<br>
+
+<br>`11` = Severe calibration failure flag |
+| **Bits 6 – 7**<br>
+
+<br>*(Convergence)* | Tracking speed performance inside the core loop solver block. | `00` = Solved efficiently ($kiter < 5$ iterations)<br>
+
+<br>`01` = Normal execution match ($kiter = 5$ iterations)<br>
+
+<br>`10` = Slow resolution track ($kiter = 6$ iterations)<br>
+
+<br>`11` = Boundary reached without matching convergence criteria |
+| **Bits 8 – 9**<br>
+
+<br>*(Sky Contam)* | Sky radiance ratio noise validation thresholds: $r_{sky} = \frac{L_{sky, B2}}{Y_{B2}}$. | `00` = High transparency background ($r_{sky} \le 0.1$)<br>
+
+<br>`01` = Moderate sky reflection load ($0.1 < r_{sky} \le 0.2$)<br>
+
+<br>`10` = Heavy background atmospheric contamination ($0.2 < r_{sky} \le 0.3$)<br>
+
+<br>`11` = Critically degraded noise profile ($r_{sky} > 0.3$) |
+| **Bits 10 – 11**<br>
+
+<br>*(MMD Bounds)* | Evaluates spectral variance dimensions against baseline limits. | `00` = Highly dynamic terrain match ($MMD2 \le 0.03$)<br>
+
+<br>`01` = Nominal material diversity ($0.03 < MMD2 \le 0.1$)<br>
+
+<br>`10` = Low spectral contrast environment ($0.1 < MMD2 \le 0.15$)<br>
+
+<br>`11` = Flat featureless spectrum layout ($MMD2 > 0.15$) |
+| **Bits 12 – 13**<br>
+
+<br>*(Emis Error)* | Evaluates total emissivity error levels ($\Delta \epsilon_{mean}$) against empirical limits. | `00` = Error within optimal scale bounds ($\le 0.013$)<br>
+
+<br>`01` = Normal expected uncertainty scale ($0.013 < \Delta \epsilon_{mean} \le 0.015$)<br>
+
+<br>`10` = Elevated spectral calculation noise ($0.015 < \Delta \epsilon_{mean} \le 0.017$)<br>
+
+<br>`11` = Highly uncertain structural output ($\Delta \epsilon_{mean} > 0.017$) |
+| **Bits 14 – 15**<br>
+
+<br>*(Temp Error)* | Evaluates surface temperature error levels ($\Delta T_s$) against structural boundaries. | `00` = Thermal resolution highly reliable ($\le 1.0\text{ K}$)<br>
+
+<br>`01` = Standard expected processing variance ($1.0\text{ K} < \Delta T_s \le 1.5\text{ K}$)<br>
+
+<br>`10` = Elevated localized temperature noise ($1.5\text{ K} < \Delta T_s \le 2.5\text{ K}$)<br>
+
+<br>`11` = Low reliability retrieval calculation ($\Delta T_s > 2.5\text{ K}$) |
+
+### Post-Solver Quality Downgrades
+
+The quality control module performs a final assessment of the solved parameters to update and downgrade pixel quality ratings where necessary:
+
+* **Mandatory State Downgrade:** If the derived emissivity values at channels $B_4$ and $B_5$ both drop below $0.95$, or if the calculated path transmittance $t1$ at channel $B_2$ falls below $0.4$, the low-order quality tracks force an immediate downgrade across bits 0 and 1 to reflect nominal execution restrictions (`01`).
+* **Extreme Thermal Cutoffs:** If the final inverted surface temperature value $T_s$ registers above **380 K** or falls below **100 K**, the anomaly is interpreted as a severe calibration or computation fault. The system overrides the associated data arrays, marking the coordinate as unproduced and setting the mandatory quality bits to a failed state (`11`).
 
 ### Stage 12: Cloud Product Integration
 
@@ -575,17 +696,24 @@ Coefficient vectors differ for 3-band and 5-band modes.
 
 ### Stage 14: Uncertainty And QC (Quality Control) Refinement
 
+This stage applies the same uncertainty model defined in Section 8.
+
+Notation reconciliation used in this repository:
+
+- `PWV` in Section 8 and `TCW` in implementation refer to the same total-column water vapor predictor.
+- Output variable names (`dT`, `de`) correspond to the same quantities denoted by $\Delta T_s$ and $\Delta \epsilon_b$ in Section 8.
+
 Per-band emissivity uncertainty:
 
-$$d\epsilon_b = xe[b][0] + xe[b][1] \cdot TCW + xe[b][2] \cdot TCW^2$$
+$$\Delta \epsilon_b = xe[b][0] + xe[b][1] \cdot \mathrm{PWV} + xe[b][2] \cdot \mathrm{PWV}^2$$
 
 Temperature uncertainty:
 
-$$dT = xt[0] + xt[1] \cdot TCW + xt[2] \cdot SVA$$
+$$\Delta T_s = xt[0] + xt[1] \cdot \mathrm{PWV} + xt[2] \cdot \mathrm{SVA}$$
 
-Aggregate emissivity RMSE:
+Aggregate emissivity RMSE (same as $\Delta \epsilon_{mean}$ in Section 8):
 
-$$RMSE_\epsilon = \sqrt{\frac{1}{n_{channels}}\sum_b d\epsilon_b^2}$$
+$$RMSE_\epsilon = \sqrt{\frac{1}{n_{channels}}\sum_b (\Delta \epsilon_b)^2}$$
 
 QC bit groups used in this implementation:
 
