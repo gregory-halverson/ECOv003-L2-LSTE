@@ -149,149 +149,363 @@ flowchart TD
 	QC[QC plane<br/>error estimates + quality flags]
 ```
 
-### End-to-End Processing Stages
+This section is an implementation-level specification of the Collection 3 processing flow centered on `src/tes_main.c`, including branching logic, variable semantics, formulas, and output conventions.
 
-The Collection 3 `tes_main.c` workflow can be summarized as the following sequence:
+### Scope
 
-1. Parse run configuration and runtime parameters (`PgeRunParameters.xml`).
-2. Read L1 thermal radiance and geolocation.
-3. Select 3-band or 5-band thermal processing mode.
-4. Optionally load ASTER GED emissivity (for TG/WVS branch).
-5. Read and normalize NWP atmosphere (MERRA/GEOS/NCEP paths).
-6. Crop and map NWP fields onto RTTOV execution grid.
-7. Run RTTOV once (nominal humidity profile).
-8. Optionally run RTTOV a second time (humidity scaled by 0.7).
-9. Interpolate RTTOV outputs back to granule geometry.
-10. Compute corrected surface-leaving radiance.
-11. Run TES (NEM + MMD + LST retrieval).
-12. Generate cloud product and ingest final cloud mask.
-13. Compute SST, uncertainty, and QC refinements.
-14. Scale/pack outputs and write LSTE/CLOUD products plus metadata sidecars.
+The algorithm section covers:
 
-### Band Modes
+1. Product orchestration: runtime configuration, input/output naming, metadata updates.
+2. Physics retrieval: NWP ingest, RTTOV execution, TG/WVS, TES retrieval.
+3. Product augmentation: cloud integration, SST replacement path, uncertainty model, QC flags.
 
-The code supports two thermal-channel modes:
+The section assumes helper functions are available for ASTER GED ingestion, NWP readers, interpolation, smoothing, and cloud generation.
 
-- 5-band mode: process thermal bands 1, 2, 3, 4, 5
-- 3-band mode: process thermal bands 2, 4, 5
+### Processing Pipeline
 
-Internally, arrays use compact band indices (`b = 0..n_channels-1`), with mapping arrays that translate between compact indices and physical ECOSTRESS thermal band IDs. The LST-driving channel remains band 4 in both modes.
+```mermaid
+flowchart TD
+	A[Parse run config and runtime parameters] --> B[Read L1 radiance and geometry]
+	B --> C[Determine thermal band set: 3-band or 5-band]
+	C --> D[Optional ASTER GED emissivity load for TG/WVS]
+	D --> E[Read and preprocess NWP atmosphere]
+	E --> F[Crop/map NWP fields onto RTTOV grid]
+	F --> G[Run RTTOV pass 1]
+	G --> H{TG/WVS enabled?}
+	H -- Yes --> I[Run RTTOV pass 2 with humidity scaled by 0.7]
+	H -- No --> J[Skip second RTTOV pass]
+	I --> K[Interpolate RTTOV outputs to granule]
+	J --> K
+	K --> L{TG/WVS enabled?}
+	L -- Yes --> M[Compute Tg, gamma, smoothed gi, corrected radiance]
+	L -- No --> N[Compute standard corrected radiance]
+	M --> O[Run TES retrieval]
+	N --> O
+	O --> P[Generate cloud product and ingest final cloud mask]
+	P --> Q[Compute emissivity wideband, uncertainty, QC refinements]
+	Q --> R[Compute SST]
+	R --> S[Scale/pack datasets]
+	S --> T[Write LSTE product, CLOUD product, metadata, sidecars]
+```
 
-### Atmospheric Correction (RTTOV)
+### Key Inputs And Outputs
 
-Top-of-atmosphere radiances from the ECOSTRESS L1CG product are atmospherically corrected using RTTOV. NWP atmospheric profiles (temperature, water vapor mixing ratio, pressure, and skin state) are transformed to RTTOV profile format, then passed to an external RTTOV executable. For each band, RTTOV returns:
+| Item | Role |
+| --- | --- |
+| L1CG_RAD / L1B_RAD | Per-band top-of-atmosphere thermal radiance input |
+| L1B_GEO (Collection 2 path) | Geolocation source for legacy path |
+| ASTER GED | Auxiliary emissivity for TG/WVS branch |
+| NWP source | Temperature, humidity, pressure, surface state, TCW |
+| RTTOV executable + coefficient file | Atmospheric forward model |
+| Radiance/temperature LUT | Radiance-to-BT and BT-to-radiance conversions |
+| SST coefficient LUTs | Split-window regression coefficients |
+| LSTE output | LST, SST, emissivity, uncertainty, QC, support fields |
+| CLOUD output | Final cloud mask used by LSTE QC refinements |
 
-- atmospheric transmittance (`t`)
-- upwelling path radiance (`pathr`)
-- downwelling reflected sky radiance (`skyr`)
+### Band Conventions
 
-Standard correction is:
+| Mode | Loaded thermal bands | Internal mapping (`band[]`) | LST reference band |
+| --- | --- | --- | --- |
+| 5-band | 1, 2, 3, 4, 5 | `[0, 1, 2, 3, 4]` | Band 4 |
+| 3-band | 2, 4, 5 | `[1, 3, 4]` | Band 4 |
 
-$$L_{surf} = \frac{L_{TOA} - L_{path}}{\tau}$$
+Internal arrays are indexed by compact band index `b = 0..n_channels-1`. Mapping arrays convert between compact index and physical ECOSTRESS band IDs.
 
-where $L_{surf}$ is bottom-of-atmosphere surface-leaving radiance (W/m$^2$/sr/$\mu$m).
+### Core State Variables
 
-#### NWP handling details
+| Variable | Meaning |
+| --- | --- |
+| `Y[b,line,pixel]` | Observed TOA radiance |
+| `t1r[b,line,pixel]` | RTTOV pass-1 transmittance |
+| `t2r[b,line,pixel]` | RTTOV pass-2 transmittance (WVS branch) |
+| `pathr[b,line,pixel]` | Upwelling path radiance |
+| `skyr[b,line,pixel]` | Downwelling sky radiance |
+| `pwv[line,pixel]` | Interpolated total column water vapor |
+| `surfradi[b,line,pixel]` | Atmospherically corrected surface-leaving radiance |
+| `Tg[b,line,pixel]` | TG/WVS brightness-temperature surrogate |
+| `g[b,line,pixel]` | Raw gamma factor |
+| `gi[b,line,pixel]` | Smoothed/modified gamma used in blending |
+| `Ts[line,pixel]` | Retrieved land surface temperature |
+| `emisf[b,line,pixel]` | Retrieved emissivity per thermal band |
+| `QC[line,pixel]` | 16-bit quality-control field |
 
-- MERRA and GEOS paths read interpolated/cropped atmosphere directly.
-- NCEP path reads native fields then upsamples/interpolates prior to RTTOV staging.
-- If total column water (`TCW`) is unavailable, it is reconstructed by vertical integration of humidity over pressure.
+### Stage 1: Runtime Configuration
 
-### Water Vapor Scaling (TG-WVS)
+Startup sequence:
 
-When `RunTgWvs` is enabled, RTTOV is executed twice:
+1. Parse run configuration XML provided on the command line.
+2. Parse `OSP/PgeRunParameters.xml`.
+3. Verify runtime `PGEVersion` matches compiled version.
+4. Load key directories, orbit/scene identifiers, product counter, and runtime tunables.
+5. Build output filenames and metadata scaffolding.
 
-1. Nominal atmosphere (`t1r`, `pathr`, `skyr`).
-2. Water-vapor-scaled atmosphere (`t2r`) with humidity profiles and surface humidity multiplied by 0.7.
+### Stage 2: L1 Radiance and Geometry Ingest
 
-ASTER GED emissivity and observed radiance are used to estimate `Tg`, then derive per-band gamma terms used to blend the two RTTOV solutions. For each band:
+1. Read selected thermal radiance bands into `Y`.
+2. Read geolocation (and Collection 2 GEO path when applicable).
+3. Compute granule lat/lon extrema for NWP crop bounds.
+
+### Stage 3: Optional ASTER GED Ingest
+
+When TG/WVS is enabled, ASTER GED emissivity is loaded over the granule footprint and used by the `Tg` branch. If disabled, ASTER ingestion is skipped.
+
+### Stage 4: NWP Normalization
+
+NWP path is selected from configured source key (MERRA/GEOS/NCEP/ECMWF). Operational behavior includes source-dependent interpolation/cropping and field clamping.
+
+If total column water (`tcw`) is missing, it is reconstructed via pressure-layer integration. Conversion constant:
+
+$$k_{\mathrm{ppmv\to g/kg}} = \frac{1}{1000 \cdot (28.966 / 18.015)}$$
+
+Integrated TCW estimate:
+
+$$\mathrm{TCW} = \frac{\sum dq \cdot dp \cdot k_{\mathrm{ppmv\to g/kg}}}{100 \cdot 9.8}$$
+
+### Stage 5: RTTOV Grid Preparation
+
+1. Build 2-D NWP lat/lon meshes.
+2. Crop NWP fields to granule extent with margin (except GEOS pre-cropped path).
+3. Slice cropped atmospheric fields (`cropT`, `cropQ`, `cropSP`, `cropTCW`, etc.).
+4. Map granule geometry to cropped NWP grid (nearest-neighbor remap).
+5. Choose RTTOV skin-temperature input (`skt` if available, else lowest atmospheric level).
+
+### Stage 6: RTTOV Profile Packing
+
+Atmospheric arrays are reshaped into the binary profile format expected by RTTOV:
+
+- repair invalid vertical temperatures/humidity
+- derive near-surface state when missing (`t2`, `q2` fallback)
+- enforce positivity where RTTOV requires it
+- apply required ordering/transposition for RTTOV interface
+
+### Stage 7: RTTOV Execution
+
+Pass 1 (always):
+
+1. Write `prof_in.bin` with nominal humidity.
+2. Execute RTTOV wrapper (`script exe coef`).
+3. Read output radiances/transmittance.
+
+Pass 2 (TG/WVS only):
+
+1. Rewrite profile with humidity multiplied by 0.7 (profile + surface).
+2. Re-run RTTOV wrapper.
+3. Read second output set.
+
+### Stage 8: Interpolate RTTOV Outputs To Granule
+
+RTTOV coarse-grid fields are bilinearly interpolated to the granule grid:
+
+- `t1r` from pass 1 transmittance
+- `t2r` from pass 2 transmittance (if enabled)
+- `pathr` from pass 1 upwelling radiance
+- `skyr` from pass 1 downwelling radiance
+- `pwv` from interpolated total column water
+
+If first-pass transmittance is non-positive everywhere, processing aborts for the granule.
+
+### Stage 9: LUT Services
+
+A 6-column radiance/temperature LUT is loaded and used for all BT/radiance conversions:
+
+| Column | Meaning |
+| --- | --- |
+| `lut[0]` | Brightness temperature |
+| `lut[1..5]` | Band 1..5 radiance |
+
+No analytic Planck expression is used in final operational retrieval; LUT conversions are authoritative.
+
+### Stage 10: Surface Radiance Correction
+
+#### Standard branch (no TG/WVS)
+
+$$L_{surf} = \frac{Y - pathr}{t1r}$$
+
+#### TG/WVS branch
+
+TG/WVS computes per-band `Tg`, converts to blackbody-equivalent radiance `B`, then derives gamma factors used to blend pass-1 and pass-2 RTTOV states.
+
+Core terms:
+
+$$g_f = g_2^{bmp[band]}$$
+
+$$\mathrm{term1} = \frac{t2r}{t1r^{g_f}}$$
+
+$$\mathrm{term2t} = \frac{B - \frac{pathr}{1 - t1r}}{Y - \frac{pathr}{1 - t1r}}$$
+
+$$\mathrm{term3} = \frac{t2r}{t1r}$$
+
+$$g = \frac{\log(\mathrm{term1} \cdot \mathrm{term2t}^{g_1 - g_f})}{\log(\mathrm{term3})}$$
+
+After clamping/smoothing and cloud handling, blended atmospheric terms are:
 
 $$t_i = t1r^{\frac{g_i - g_f}{1 - g_f}} \cdot t2r^{\frac{1 - g_i}{1 - g_f}}$$
 
 $$path_i = pathr \cdot \frac{1 - t_i}{1 - t1r}$$
 
-$$L_{surf} = \frac{L_{TOA} - path_i}{t_i}$$
+$$L_{surf} = \frac{Y - path_i}{t_i}$$
 
-Gamma is clamped/smoothed spatially, low-PWV pixels can be forced to $g_i = 1$, and cloudy pixels are reset to the no-adjustment solution after smoothing.
+Negative corrected radiance is treated as invalid.
 
-### Temperature And Emissivity Separation (TES)
+TG/WVS control logic:
 
-TES retrieves LST and emissivity from corrected radiance in radiance space using a LUT-based Planck inversion.
+```mermaid
+flowchart TD
+	A[Compute mean land Tg using band 4] --> B{Tg_mean < Tg_thresh?}
+	B -- Yes --> C[Use PWV_thresh1 and smooth_scale1]
+	B -- No --> D[Use PWV_thresh2 and smooth_scale2]
+	C --> E[If PWV below threshold force gi = 1]
+	D --> E
+	E --> F[Smooth gi per band]
+	F --> G[Reset cloudy pixels to gi = 1]
+```
 
-#### NEM step
+### Stage 11: TES Retrieval
 
-Starting from assumed maximum emissivity (`emax`):
+TES runs per-pixel on corrected radiance.
+
+#### NEM initialization
 
 $$R_i = L_{surf,i} - (1 - \epsilon_{max}) \cdot L_{sky,i}$$
 
-Brightness temperatures are retrieved from the radiance LUT; `Tnem` is the warmest band temperature. The `NEM_planck` loop updates corrected radiance and emissivity until convergence/divergence criteria are met.
+Radiance is converted to BT by LUT; `Tnem` is the warmest channel.
 
-Convergence behavior in code:
+#### NEM iterative behavior
 
-- success: all band radiance updates are within 0.05 after at least 3 iterations
-- failure (divergence): all updates exceed 0.05 after at least 3 iterations
-- failure: max iterations reached without convergence
+Convergence rule:
 
-#### MMD and final emissivity
+- success when all band updates are within 0.05 radiance units after at least 3 iterations
 
-From the NEM emissivity vector `ef`, TES computes normalized contrast (`beta_2`), then maximum-minus-minimum difference (`MMD2`) to estimate minimum emissivity:
+Divergence rule:
+
+- failure when all band updates increase by more than 0.05 after at least 3 iterations
+
+Timeout rule:
+
+- failure when maximum iteration count is reached without convergence
+
+#### MMD emissivity recovery
+
+Using NEM emissivity estimate `ef`:
+
+$$bm2 = \mathrm{mean}(ef_{bands\ 2..4})$$
+
+$$\beta_2[i] = \frac{ef[i]}{bm2}$$
+
+$$MMD2 = \max(\beta_2) - \min(\beta_2)$$
 
 $$\epsilon_{min} = co[0] - co[1] \cdot MMD2^{co[2]}$$
 
-Final emissivity spectrum is reconstructed from `beta_2` and $\epsilon_{min}$.
+$$emisf[i] = \beta_2[i] \cdot \frac{\epsilon_{min}}{\min(\beta_2)}$$
 
-#### LST channel
+#### LST retrieval
 
-Final LST is derived from corrected radiance in band 4 (the fixed LST reference channel).
+Band 4 is always the LST reference channel:
 
-### Cloud Detection
+$$R_{eff,c} = \frac{Reff[b_{B4}]}{emisf[b_{B4}]}$$
 
-Cloud processing (`process_cloud`) runs after TES and combines:
+$$Ts = LUT_{rad\to temp}(R_{eff,c}, band\ 4)$$
 
-1. Band-4 BT against time-of-day climatological clear-sky thresholds (00/06/12/18 UTC LUTs).
-2. Collection 3 emissivity discriminator using smoothed mean emissivity from bands 4 and 5.
+TES flow:
 
-Cloud masks are spatially extended by `cloud_extend`, written to `ECOv003_L2G_CLOUD`, then re-read by the LSTE path for QC and summary metadata.
+```mermaid
+flowchart TD
+	A[Validate corrected radiance inputs] --> B[Select coefficient family and emax]
+	B --> C[Run NEM_planck]
+	C --> D{NEM success?}
+	D -- No --> E[Mark pixel not produced]
+	D -- Yes --> F[Compute beta2 and MMD2]
+	F --> G[Recover emissivity spectrum]
+	G --> H[Convert band-4 corrected radiance to LST]
+	H --> I[Update QC subfields]
+```
 
-### Sea Surface Temperature
+### Stage 12: Cloud Product Integration
 
-SST uses a split-window regression with band 4 and 5 brightness temperatures and satellite zenith angle:
+Cloud logic executes after TES and includes:
 
-$$SST = xeco1 + xeco2 \cdot TB4 + xeco3 \cdot (TB4 - TB5) + xeco4 \cdot (1 - \sec(\theta)) \cdot (TB4 - TB5)$$
+1. BT-LUT threshold test on band 4.
+2. Emissivity discriminator from smoothed mean emissivity of bands 4 and 5.
 
-Coefficients are loaded from monthly and 6-hourly LUTs (`ECOSTRESS_SSTv3_Coeffs_MM_HH.nc`), cropped around the granule, and bilinearly interpolated to the ECOSTRESS grid.
+Final cloud mask is re-ingested from CLOUD output and used for LSTE QC refinement and metadata summaries.
 
-### Uncertainty And Quality Control
+### Stage 13: Wideband Emissivity
 
-Per-pixel emissivity and LST errors are modeled from precipitable water and view angle:
+Wideband emissivity uses a linear combination of narrowband emissivity:
+
+$$EmisWB = c_0 + \sum_b c_b \cdot emisf[b]$$
+
+Coefficient vectors differ for 3-band and 5-band modes.
+
+### Stage 14: Uncertainty And QC Refinement
+
+Per-band emissivity uncertainty:
 
 $$d\epsilon_b = xe[b][0] + xe[b][1] \cdot TCW + xe[b][2] \cdot TCW^2$$
 
+Temperature uncertainty:
+
 $$dT = xt[0] + xt[1] \cdot TCW + xt[2] \cdot SVA$$
 
-QC is encoded in a 16-bit field updated across the pipeline, including:
+Aggregate emissivity RMSE:
 
-- mandatory production state
-- missing scan/bad input state
-- NEM convergence quality
-- sky-radiance contamination quality
-- MMD spectral-contrast quality
-- emissivity uncertainty tier
-- LST uncertainty tier
+$$RMSE_\epsilon = \sqrt{\frac{1}{n_{channels}}\sum_b d\epsilon_b^2}$$
 
-Additional handling includes missing-scan inflation terms, invalid low/high temperature checks, and forced NaN outputs for not-produced pixels.
+QC bit groups used in this implementation:
 
-### Product Packing And Outputs
+| Bits | Meaning |
+| --- | --- |
+| 0-1 | Mandatory state (good / nominal / cloudy / not produced) |
+| 2-3 | Missing scan / bad input state |
+| 6-7 | NEM convergence quality |
+| 8-9 | Sky-radiance contamination quality |
+| 10-11 | MMD spectral-contrast quality |
+| 12-13 | Emissivity uncertainty tier |
+| 14-15 | LST uncertainty tier |
 
-Internal floating-point retrievals are packed to product datatypes using fixed scales/offsets prior to writing HDF-EOS outputs. Key fields include:
+Missing scan flags from L1 data quality (`DataQ`) affect both QC and uncertainty inflation terms.
 
-- `LST`, `SST`
-- per-band emissivity and emissivity error
-- wideband emissivity (`EmisWB`)
-- `LST_err`, `PWV`, `QC`
-- `cloud_mask`, geometry support fields
+### Stage 15: SST Retrieval
 
-In 3-band mode, placeholder emissivity layers are inserted for schema compatibility with the 5-band product layout.
+SST coefficients are loaded from monthly and 6-hourly LUT files:
+
+`ECOSTRESS_SSTv3_Coeffs_MM_HH.nc`
+
+Coefficient grids are cropped and bilinearly interpolated to the granule (`xeco1..xeco4`). Then SST is evaluated as:
+
+$$sec(\theta) = \frac{1}{\cos(\theta)}$$
+
+$$SST = xeco1 + xeco2 \cdot TB4 + xeco3 \cdot (TB4 - TB5) + xeco4 \cdot (1 - sec(\theta)) \cdot (TB4 - TB5)$$
+
+Band-4 and band-5 BTs are selected using mode-specific mapping in 3-band and 5-band configurations.
+
+### Stage 16: Packing And Product Writeout
+
+Internal floating-point arrays are packed to output product datatypes with fixed scale/offset conventions:
+
+| Dataset | Internal units | Output type | Scale | Offset |
+| --- | --- | --- | --- | --- |
+| `LST` | K | `uint16` | 0.02 | 0 |
+| `SST` | K | `uint16` | 0.02 | 0 |
+| `LST_err` | K | `uint8` | 0.04 | 0 |
+| `Emis*` | unitless | `uint8` | 0.002 | 0.49 |
+| `Emis*_err` | unitless | `uint16` | 1e-4 | 0 |
+| `EmisWB` | unitless | `uint8` | 0.002 | 0.49 |
+| `PWV` | cm | `uint16` | 0.001 | 0 |
+| `view_zenith` | degree | `float32` | 1 | 0 |
+| `height` | m | `float32` | 1 | 0 |
+
+In 3-band mode, placeholder emissivity layers are written for missing thermal bands to preserve output schema compatibility.
+
+### Reimplementation Notes
+
+For faithful porting and cross-language reproduction:
+
+1. Preserve LUT-driven radiance/temperature conversion in all retrieval paths.
+2. Preserve 3-band index remapping exactly.
+3. Keep two-pass RTTOV humidity-scaled branch when TG/WVS is enabled.
+4. Preserve post-TES cloud-mask ingestion and QC refinement ordering.
+5. Preserve scale/offset/fill-value packing conventions for product compatibility.
 
 ## References
 
