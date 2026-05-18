@@ -1,6 +1,6 @@
 # tes_main.c Algorithm Guide
 
-This document explains the end-to-end workflow implemented in `src/tes_main.c` at pseudocode level. The goal is not to mirror the C syntax line by line, but to describe the processing stages, state transitions, formulas, branching rules, and output semantics well enough to re-implement the pipeline in another language.
+This document explains the end-to-end workflow implemented in `src/tes_main.c` at implementation-guide level. The goal is not to mirror the C syntax line by line, but to describe the processing stages, state transitions, formulas, branching rules, and output semantics well enough to re-implement the pipeline in another language.
 
 The file combines three kinds of logic:
 
@@ -111,27 +111,11 @@ At startup it:
    - LUT filenames
    - ASTER directory override
 
-### Pseudocode
+### Verbal Instructions
 
-```text
-run_config = parse_xml(argv[1])
-run_params = parse_xml(OSP_dir + "/PgeRunParameters.xml")
-assert run_params.PGEVersion == compiled_PGE_VERSION
+To reproduce the configuration stage, begin by parsing the XML run configuration file passed on the command line. Next, parse `PgeRunParameters.xml` from the OSP directory and stop immediately if its `PGEVersion` does not match the executable's compiled version string.
 
-NWP_dir = run_config.StaticAncillaryFileGroup.NWP_DIR
-OSP_dir = run_config.StaticAncillaryFileGroup.L2_OSP_DIR + "/"
-product_path = run_config.ProductPathGroup.ProductPath
-product_counter = run_config.ProductPathGroup.ProductCounter
-
-RAD_filename = choose_input_radiance_file(run_config)
-GEO_filename = choose_geo_file_if_collection2(run_config)
-
-orbit_number = run_config.Geometry.OrbitNumber
-scene_id = run_config.Geometry.SceneID or SceneId
-
-load all runtime parameters with defaults
-derive output filenames from orbit, scene, timestamp, version
-```
+After the two XML files are loaded, extract the NWP directory, OSP directory, product output path, product counter, input filenames, orbit number, and scene ID from the run configuration. Then load the runtime parameters, using the hard-coded defaults whenever a parameter is absent. Finally, derive the output product filenames from the orbit number, scene ID, timestamp embedded in the radiance filename, and product counter.
 
 ## Stage 2: Band Selection
 
@@ -161,19 +145,11 @@ This is the central radiance tensor used throughout the retrieval.
 
 The code also derives a lat/lon bounding box from the granule geolocation for later NWP cropping.
 
-### Pseudocode
+### Verbal Instructions
 
-```text
-vRAD = read_radiance_and_geometry(RAD_filename, GEO_filename_if_needed, band_selection)
+To reproduce the L1 ingest stage, read the selected thermal radiance bands into the `RAD` structure and, when processing Collection 2 data, also read the separate GEO file. Allocate a 3-D radiance tensor `Y` with one plane per processed band, then copy each band image into its corresponding plane in processing order.
 
-for b in 0 .. n_channels-1:
-    Y[b,:,:] = vRAD.Rad[b]
-
-crop.minLat = min(vRAD.Lat)
-crop.maxLat = max(vRAD.Lat)
-crop.minLon = min(vRAD.Lon)
-crop.maxLon = max(vRAD.Lon)
-```
+Once the radiance and geometry are loaded, scan the latitude and longitude grids to determine the minimum and maximum latitude and longitude present in the granule. Use those extrema to define the geographic crop bounds for the later NWP extraction step.
 
 ## Stage 4: Optional ASTER GED Load
 
@@ -542,38 +518,23 @@ the function iteratively solves for:
 - `Tnem`: maximum brightness temperature implied by that spectrum
 - `Re[band]`: corrected radiance after downwelling adjustment
 
-#### NEM pseudocode
+#### Verbal Instructions
 
-```text
-function NEM_planck(emax, surfradin[], skyradin[], max_iterations):
-    for each band:
-        if surfradin or skyradin is NaN: return QA_FAIL
-        R[band] = surfradin[band] - (1 - emax) * skyradin[band]
-        T[band] = LUT_radiance_to_temperature(R[band] / emax)
-    Tnem = max(T)
+To reproduce `NEM_planck`, begin by checking every band input. If either the surface radiance or sky radiance is NaN in any band, treat the retrieval as failed immediately.
 
-    for each band:
-        B = LUT_temperature_to_radiance(Tnem, band)
-        e[band] = R[band] / B
+For each band, compute an initial corrected radiance by subtracting the downwelling contribution implied by the maximum emissivity assumption:
 
-    Rold = R
-    for k in 1 .. max_iterations:
-        if k == max_iterations: return QA_FAIL
+$$
+R[band] = surfradi[band] - (1 - emax) \cdot skyradi[band]
+$$
 
-        for each band:
-            Re[band] = surfradin[band] - (1 - e[band]) * skyradin[band]
-            Te[band] = LUT_radiance_to_temperature(Re[band] / e[band])
-        Tnem = max(Te)
+Convert each of those radiances into brightness temperature using the LUT and set `Tnem` to the warmest band temperature. Then convert `Tnem` back to blackbody radiance in each band and estimate the first emissivity spectrum as `R / B`.
 
-        diff[band] = Re[band] - Rold[band]
-        if all abs(diff) < 0.05 and k > 2: return QA_OK
-        if all diff > 0.05 and k > 2: return QA_FAIL
+After that initialization, iterate. In each iteration, recompute the corrected band radiance using the current emissivity estimate, convert that corrected radiance back to temperature, and update `Tnem` as the maximum temperature across bands. Compare the new corrected radiance with the previous corrected radiance in every band.
 
-        for each band:
-            B = LUT_temperature_to_radiance(Tnem, band)
-            e[band] = Re[band] / B
-            Rold[band] = Re[band]
-```
+If all bands change by less than 0.05 radiance units and at least three iterations have occurred, declare convergence and return success. If all bands increase by more than 0.05 radiance units after at least three iterations, declare divergence and return failure. If the maximum iteration count is reached before convergence, also return failure.
+
+When neither convergence nor divergence has been reached, convert the current `Tnem` back to blackbody radiance in every band, update emissivity as `Re / B`, store the current corrected radiance as the old value, and continue to the next iteration.
 
 ### 12.3 Compute normalized emissivity contrast
 
@@ -835,64 +796,23 @@ The file then:
    - cloud summary statistics
 7. Writes both HDF5 metadata groups and `.met` XML sidecar files for LSTE and cloud.
 
-## End-To-End Pseudocode
+## End-To-End Verbal Instructions
 
-```text
-function main(run_config_path):
-    read run config and runtime parameters
-    choose 3-band or 5-band mode
-    derive filenames and metadata scaffolding
+Start by reading the run configuration and runtime parameters, choosing whether the granule will be processed in 3-band or 5-band mode, and constructing the output filenames and metadata containers.
 
-    vRAD = read radiance + geometry
-    Y = stack selected radiance bands
-    crop = bounding_box(vRAD.Lat, vRAD.Lon)
+Read the input radiance and geometry data, stack the selected thermal bands into `Y`, and derive a geographic bounding box from the granule latitude and longitude grids. If TG/WVS is enabled, load ASTER GED emissivity for the granule footprint before continuing.
 
-    if RunTgWvs:
-        emis_aster = read_aster_ged(vRAD.Lat, vRAD.Lon, vRAD.Water)
+Read the atmospheric input from the configured NWP source, normalize and clamp the fields, and compute total column water if the source does not provide it explicitly. Crop the NWP domain to the granule neighborhood, map the granule geometry onto that cropped atmospheric grid, and choose the RTTOV skin-temperature input from the provided skin temperature field or the lowest atmospheric temperature level.
 
-    nwpATM = read_nwp_by_source(NWP_dir, tes_date, crop)
-    clamp and normalize NWP fields
-    if tcw missing:
-        compute_tcw_from_q_and_pressure(nwpATM)
+Transform the cropped atmospheric state into the flattened RTTOV input layout and run RTTOV once using the unscaled humidity profile. If TG/WVS is enabled, run RTTOV a second time after scaling the humidity inputs by 0.7. Interpolate the RTTOV outputs from the coarse atmospheric grid back to the granule geometry to produce transmission, path radiance, downwelling sky radiance, and precipitable water vapor on the original ECOSTRESS grid.
 
-    cropped_nwp = crop_nwp_domain(nwpATM, crop)
-    cropSatZen, cropHsurf = map_granule_geometry_to_cropped_nwp(vRAD)
-    Tskin = cropskt if available else lowest_temperature_level
+Load the radiance-to-temperature lookup table. If TG/WVS is enabled, compute `Tg`, derive the raw gamma field, modify and smooth it into `gi`, and use `gi` to blend the two RTTOV runs into corrected surface radiance. Otherwise, compute corrected surface radiance directly from the first RTTOV transmission and path radiance.
 
-    rATM = build_rttov_input(cropped_nwp, cropSatZen, cropHsurf, Tskin)
+Run the TES retrieval on each pixel to obtain land surface temperature, band emissivities, and the initial quality flags. Next, generate the cloud product, re-read the final cloud mask, and use that mask to update QA and cloud summary metadata.
 
-    RTM1 = run_rttov(wvs_case=0, rATM)
-    if RunTgWvs:
-        RTM2 = run_rttov(wvs_case=1, humidity_scaled_by_0_7)
+Compute wideband emissivity, emissivity uncertainty, LST uncertainty, and the final QC refinements, including the missing-scan adjustments. Then compute sea surface temperature by loading the SST coefficient grids, interpolating those coefficients to the granule, converting the observed radiance to brightness temperatures for bands 4 and 5, and evaluating the SST regression.
 
-    t1r, pathr, skyr, pwv = interpolate_RTM1_to_granule(RTM1)
-    if RunTgWvs:
-        t2r = interpolate_RTM2_to_granule(RTM2)
-
-    lut = read_radiance_temperature_lut()
-
-    if RunTgWvs:
-        Tg = tg_wvs(pwv, satzen, emis_aster, Y, lut, coeffs)
-        g = compute_raw_gamma(Tg, Y, t1r, t2r, pathr, lut)
-        gi = modify_gamma_with_cloud_pwv_and_smoothing(g, Tg, pwv, cloud)
-        surfradi = blend_two_rttov_runs(Y, t1r, t2r, pathr, gi)
-    else:
-        surfradi = (Y - pathr) / t1r
-
-    Ts, emisf, QC = apply_tes_algorithm(surfradi, skyr, t1r, Y)
-
-    cloud_product = process_cloud(vRAD, lut, emisf)
-    cloud_mask = read_final_cloud_mask(cloud_product)
-
-    emis_wb = linear_wideband_emissivity(emisf)
-    de, dT, QC = compute_error_estimates_and_refine_QC(Ts, emisf, pwv, satzen, cloud_mask, DataQ)
-
-    Tsea = compute_sst(Y, satzen, granule_lat_lon, OSP_sst_coefficients, lut)
-
-    packed_outputs = scale_and_pack(Ts, Tsea, emisf, emis_wb, de, dT, pwv, satzen, height, cloud_mask, water_mask)
-    write_hdf5_product(packed_outputs, metadata)
-    write_cloud_metadata_and_sidecars()
-```
+Finally, scale and pack every floating-point retrieval into its external product type, write the LSTE output datasets and metadata, update the cloud product metadata, and emit the sidecar `.met` files for both products.
 
 ## Reimplementation Notes
 
