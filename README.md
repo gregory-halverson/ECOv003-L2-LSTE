@@ -51,7 +51,7 @@ Running `make environment` creates a conda environment named `ECOv003-L2-LSTE` a
 
 > **Note:** There is no `environment.yml` — packages are installed directly by the `Makefile`. `make install` calls `make environment` automatically, so running them separately is optional.
 
-### RTTOV (Radiative Transfer for TOVS)
+### RTTOV 
 
 This software requires the Radiative Transfer for TOVS (RTTOV) radiative transfer model for atmospheric correction. 
 
@@ -261,7 +261,7 @@ Integrated TCW estimate:
 
 $$\mathrm{TCW} = \frac{\sum dq \cdot dp \cdot k_{\mathrm{ppmv\to g/kg}}}{100 \cdot 9.8}$$
 
-### Stage 5: RTTOV (Radiative Transfer for TOVS) Grid Preparation
+### Stage 5: RTTOV  Grid Preparation
 
 1. Build 2-D NWP lat/lon meshes.
 2. Crop NWP fields to granule extent with margin (except GEOS pre-cropped path).
@@ -269,7 +269,7 @@ $$\mathrm{TCW} = \frac{\sum dq \cdot dp \cdot k_{\mathrm{ppmv\to g/kg}}}{100 \cd
 4. Map granule geometry to cropped NWP grid (nearest-neighbor remap).
 5. Choose RTTOV skin-temperature input (`skt` if available, else lowest atmospheric level).
 
-### Stage 6: RTTOV (Radiative Transfer for TOVS) Profile Packing
+### Stage 6: RTTOV  Profile Packing
 
 Atmospheric arrays are reshaped into the binary profile format expected by RTTOV:
 
@@ -278,7 +278,7 @@ Atmospheric arrays are reshaped into the binary profile format expected by RTTOV
 - enforce positivity where RTTOV requires it
 - apply required ordering/transposition for RTTOV interface
 
-### Stage 7: RTTOV (Radiative Transfer for TOVS) Execution
+### Stage 7: RTTOV  Execution
 
 Pass 1 (always):
 
@@ -292,7 +292,7 @@ Pass 2 (TG/WVS only):
 2. Re-run RTTOV wrapper.
 3. Read second output set.
 
-### Stage 8: Interpolate RTTOV (Radiative Transfer for TOVS) Outputs To Granule
+### Stage 8: Interpolate RTTOV  Outputs To Granule
 
 RTTOV coarse-grid fields are bilinearly interpolated to the granule grid:
 
