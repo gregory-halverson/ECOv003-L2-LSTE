@@ -149,57 +149,149 @@ flowchart TD
 	QC[QC plane<br/>error estimates + quality flags]
 ```
 
+### End-to-End Processing Stages
 
+The Collection 3 `tes_main.c` workflow can be summarized as the following sequence:
+
+1. Parse run configuration and runtime parameters (`PgeRunParameters.xml`).
+2. Read L1 thermal radiance and geolocation.
+3. Select 3-band or 5-band thermal processing mode.
+4. Optionally load ASTER GED emissivity (for TG/WVS branch).
+5. Read and normalize NWP atmosphere (MERRA/GEOS/NCEP paths).
+6. Crop and map NWP fields onto RTTOV execution grid.
+7. Run RTTOV once (nominal humidity profile).
+8. Optionally run RTTOV a second time (humidity scaled by 0.7).
+9. Interpolate RTTOV outputs back to granule geometry.
+10. Compute corrected surface-leaving radiance.
+11. Run TES (NEM + MMD + LST retrieval).
+12. Generate cloud product and ingest final cloud mask.
+13. Compute SST, uncertainty, and QC refinements.
+14. Scale/pack outputs and write LSTE/CLOUD products plus metadata sidecars.
+
+### Band Modes
+
+The code supports two thermal-channel modes:
+
+- 5-band mode: process thermal bands 1, 2, 3, 4, 5
+- 3-band mode: process thermal bands 2, 4, 5
+
+Internally, arrays use compact band indices (`b = 0..n_channels-1`), with mapping arrays that translate between compact indices and physical ECOSTRESS thermal band IDs. The LST-driving channel remains band 4 in both modes.
 
 ### Atmospheric Correction (RTTOV)
 
-Top-of-atmosphere radiances from the ECOSTRESS L1CG product are atmospherically corrected using the Radiative Transfer for TOVS (RTTOV) model. NWP atmospheric profiles (temperature, water vapor mixing ratio, surface pressure, and skin temperature) from MERRA-2, GEOS-5, NCEP, or ECMWF are interpolated to each pixel and passed to RTTOV, which computes per-band transmittance (`t`), upwelling path radiance (`pathr`), and downwelling sky radiance (`skyr`).
+Top-of-atmosphere radiances from the ECOSTRESS L1CG product are atmospherically corrected using RTTOV. NWP atmospheric profiles (temperature, water vapor mixing ratio, pressure, and skin state) are transformed to RTTOV profile format, then passed to an external RTTOV executable. For each band, RTTOV returns:
 
-The standard atmospheric correction is:
+- atmospheric transmittance (`t`)
+- upwelling path radiance (`pathr`)
+- downwelling reflected sky radiance (`skyr`)
+
+Standard correction is:
 
 $$L_{surf} = \frac{L_{TOA} - L_{path}}{\tau}$$
 
-where $L_{surf}$ is the atmospherically corrected bottom-of-atmosphere surface-leaving radiance in W/m²/sr/μm.
+where $L_{surf}$ is bottom-of-atmosphere surface-leaving radiance (W/m$^2$/sr/$\mu$m).
 
-#### Water Vapor Scaling (TG-WVS)
+#### NWP handling details
 
-When precipitable water vapor (PWV) exceeds a threshold (~2.0–2.5 cm), an additional Water Vapor Scaling (WVS) correction is applied. ASTER GED emissivity is used to estimate a ground brightness temperature `Tg`, which is then used to derive per-band gamma correction factors (`g`) that scale the effective water vapor path. RTTOV is run a second time with water vapor scaled by 0.7 to produce a corrected atmospheric state, and the transmittance and path radiance are blended between the two runs using the gamma factors. This improves surface radiance retrieval under high-humidity conditions.
+- MERRA and GEOS paths read interpolated/cropped atmosphere directly.
+- NCEP path reads native fields then upsamples/interpolates prior to RTTOV staging.
+- If total column water (`TCW`) is unavailable, it is reconstructed by vertical integration of humidity over pressure.
 
-### Temperature & Emissivity Separation (TES)
+### Water Vapor Scaling (TG-WVS)
 
-The TES algorithm simultaneously retrieves land surface temperature (LST) and per-band surface emissivity from the atmospherically corrected surface-leaving radiances. It operates entirely in radiance space (W/m²/sr/μm) using pre-computed Planck function lookup tables.
+When `RunTgWvs` is enabled, RTTOV is executed twice:
 
-**NEM (Normalized Emissivity Method):** An assumed maximum emissivity (`emax`) is used as a starting point. For each pixel and band, the reflected sky component is removed:
+1. Nominal atmosphere (`t1r`, `pathr`, `skyr`).
+2. Water-vapor-scaled atmosphere (`t2r`) with humidity profiles and surface humidity multiplied by 0.7.
+
+ASTER GED emissivity and observed radiance are used to estimate `Tg`, then derive per-band gamma terms used to blend the two RTTOV solutions. For each band:
+
+$$t_i = t1r^{\frac{g_i - g_f}{1 - g_f}} \cdot t2r^{\frac{1 - g_i}{1 - g_f}}$$
+
+$$path_i = pathr \cdot \frac{1 - t_i}{1 - t1r}$$
+
+$$L_{surf} = \frac{L_{TOA} - path_i}{t_i}$$
+
+Gamma is clamped/smoothed spatially, low-PWV pixels can be forced to $g_i = 1$, and cloudy pixels are reset to the no-adjustment solution after smoothing.
+
+### Temperature And Emissivity Separation (TES)
+
+TES retrieves LST and emissivity from corrected radiance in radiance space using a LUT-based Planck inversion.
+
+#### NEM step
+
+Starting from assumed maximum emissivity (`emax`):
 
 $$R_i = L_{surf,i} - (1 - \epsilon_{max}) \cdot L_{sky,i}$$
 
-The temperature in each band is retrieved by inverting the Planck function via LUT. The maximum band temperature is taken as the NEM temperature estimate `Tnem`.
+Brightness temperatures are retrieved from the radiance LUT; `Tnem` is the warmest band temperature. The `NEM_planck` loop updates corrected radiance and emissivity until convergence/divergence criteria are met.
 
-**MMD (Max-Min Difference):** Per-band emissivities are computed from the ratio of surface radiance to the Planck function evaluated at `Tnem`. The spectral contrast (MMD) is used to refine the emissivity estimate through an empirical relationship between MMD and minimum emissivity. This step is iterated until convergence.
+Convergence behavior in code:
 
-**LST:** The final LST is derived from the clearest (highest-emissivity) band using the refined emissivity and the inverted Planck function. Over water pixels, a fixed emissivity is applied.
+- success: all band radiance updates are within 0.05 after at least 3 iterations
+- failure (divergence): all updates exceed 0.05 after at least 3 iterations
+- failure: max iterations reached without convergence
+
+#### MMD and final emissivity
+
+From the NEM emissivity vector `ef`, TES computes normalized contrast (`beta_2`), then maximum-minus-minimum difference (`MMD2`) to estimate minimum emissivity:
+
+$$\epsilon_{min} = co[0] - co[1] \cdot MMD2^{co[2]}$$
+
+Final emissivity spectrum is reconstructed from `beta_2` and $\epsilon_{min}$.
+
+#### LST channel
+
+Final LST is derived from corrected radiance in band 4 (the fixed LST reference channel).
 
 ### Cloud Detection
 
-Cloud detection is performed by `process_cloud()` after TES retrieval. The algorithm applies two complementary tests:
+Cloud processing (`process_cloud`) runs after TES and combines:
 
-1. **BT-LUT test:** Band 4 brightness temperature (TB4) is compared against a climatological clear-sky BT threshold from a time-of-day-dependent LUT (four 6-hourly files covering 00, 06, 12, and 18 UTC). Pixels colder than the threshold are flagged as cloud.
+1. Band-4 BT against time-of-day climatological clear-sky thresholds (00/06/12/18 UTC LUTs).
+2. Collection 3 emissivity discriminator using smoothed mean emissivity from bands 4 and 5.
 
-2. **BT-difference / emissivity test (Collection 3):** The mean of Bands 4 and 5 emissivity (`Emismm`, spatially smoothed with a 5×5 window) provides an additional discriminator between cloud and low-emissivity surfaces.
-
-Cloud flags are spatially extended by `cloud_extend` pixels and written to the `ECOv003_L2G_CLOUD` product.
+Cloud masks are spatially extended by `cloud_extend`, written to `ECOv003_L2G_CLOUD`, then re-read by the LSTE path for QC and summary metadata.
 
 ### Sea Surface Temperature
 
-Over ocean pixels, a dedicated Sea Surface Temperature (SST) algorithm replaces the TES-derived LST. SST is computed from Band 4 and Band 5 brightness temperatures and the satellite zenith angle using a split-window regression:
+SST uses a split-window regression with band 4 and 5 brightness temperatures and satellite zenith angle:
 
-$$SST = c_1 \cdot TB_4 + c_2 \cdot (TB_4 - TB_5) + c_3 \cdot (TB_4 - TB_5) \cdot \sec(\theta) + c_4$$
+$$SST = xeco1 + xeco2 \cdot TB4 + xeco3 \cdot (TB4 - TB5) + xeco4 \cdot (1 - \sec(\theta)) \cdot (TB4 - TB5)$$
 
-Coefficients are loaded from monthly/6-hourly NetCDF LUT files (`ECOSTRESS_SSTv3_Coeffs_MM_HH.nc`) and bilinearly interpolated to the granule grid using a geolocation reference file.
+Coefficients are loaded from monthly and 6-hourly LUTs (`ECOSTRESS_SSTv3_Coeffs_MM_HH.nc`), cropped around the granule, and bilinearly interpolated to the ECOSTRESS grid.
 
-### Uncertainty Quantification
+### Uncertainty And Quality Control
 
-Per-pixel LST and emissivity error estimates are computed as a function of PWV and satellite zenith angle using empirical polynomial coefficients (`xe`). Error thresholds are tiered into three quality levels (low/medium/high uncertainty), with limits of `[1.0, 1.5, 2.5]` K for LST and `[0.013, 0.015, 0.017]` for emissivity. These errors and the corresponding quality flags are written to the `QC` data plane in the L2G LSTE product.
+Per-pixel emissivity and LST errors are modeled from precipitable water and view angle:
+
+$$d\epsilon_b = xe[b][0] + xe[b][1] \cdot TCW + xe[b][2] \cdot TCW^2$$
+
+$$dT = xt[0] + xt[1] \cdot TCW + xt[2] \cdot SVA$$
+
+QC is encoded in a 16-bit field updated across the pipeline, including:
+
+- mandatory production state
+- missing scan/bad input state
+- NEM convergence quality
+- sky-radiance contamination quality
+- MMD spectral-contrast quality
+- emissivity uncertainty tier
+- LST uncertainty tier
+
+Additional handling includes missing-scan inflation terms, invalid low/high temperature checks, and forced NaN outputs for not-produced pixels.
+
+### Product Packing And Outputs
+
+Internal floating-point retrievals are packed to product datatypes using fixed scales/offsets prior to writing HDF-EOS outputs. Key fields include:
+
+- `LST`, `SST`
+- per-band emissivity and emissivity error
+- wideband emissivity (`EmisWB`)
+- `LST_err`, `PWV`, `QC`
+- `cloud_mask`, geometry support fields
+
+In 3-band mode, placeholder emissivity layers are inserted for schema compatibility with the 5-band product layout.
 
 ## References
 
