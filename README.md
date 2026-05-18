@@ -137,7 +137,7 @@ flowchart TD
 	GEO --> SST
 	LUTs --> SST
 	MASK --> SST
-	SST[Ocean split-window SST<br/>replaces TES LST over water] --> LSTE
+	SST[Ocean split-window SST<br/>reported as companion SST field] --> LSTE
 
 	TES --> UQ
 	GEO --> UQ
@@ -157,7 +157,7 @@ The algorithm section covers:
 
 1. Product orchestration: runtime configuration, input/output naming, metadata updates.
 2. Physics retrieval: NWP ingest, RTTOV execution, TG/WVS, TES retrieval.
-3. Product augmentation: cloud integration, SST replacement path, uncertainty model, QC flags.
+3. Product augmentation: cloud integration, SST retrieval path, uncertainty model, QC flags.
 
 The section assumes helper functions are available for ASTER GED ingestion, NWP readers, interpolation, smoothing, and cloud generation.
 
@@ -345,7 +345,7 @@ $$path_i = pathr \cdot \frac{1 - t_i}{1 - t1r}$$
 
 $$L_{surf} = \frac{Y - path_i}{t_i}$$
 
-Negative corrected radiance is treated as invalid.
+In the TG/WVS branch, negative corrected radiance is treated as invalid.
 
 TG/WVS control logic:
 
@@ -425,9 +425,9 @@ flowchart TD
 Cloud logic executes after TES and includes:
 
 1. BT-LUT threshold test on band 4.
-2. Emissivity discriminator from smoothed mean emissivity of bands 4 and 5.
+2. Collection-3 emissivity discriminator from smoothed mean emissivity of bands 4 and 5 (written as `emis_cloud`).
 
-Final cloud mask is re-ingested from CLOUD output and used for LSTE QC refinement and metadata summaries.
+`Cloud_final` is produced from the BT-LUT cloud test and re-ingested from CLOUD output for LSTE QC refinement and metadata summaries.
 
 ### Stage 13: Wideband Emissivity
 
@@ -478,6 +478,8 @@ $$sec(\theta) = \frac{1}{\cos(\theta)}$$
 $$SST = xeco1 + xeco2 \cdot TB4 + xeco3 \cdot (TB4 - TB5) + xeco4 \cdot (1 - sec(\theta)) \cdot (TB4 - TB5)$$
 
 Band-4 and band-5 BTs are selected using mode-specific mapping in 3-band and 5-band configurations.
+
+SST is output as a separate dataset and does not overwrite the TES-derived LST dataset.
 
 ### Stage 16: Packing And Product Writeout
 
