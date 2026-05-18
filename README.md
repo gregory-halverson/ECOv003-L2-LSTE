@@ -499,16 +499,6 @@ Internal floating-point arrays are packed to output product datatypes with fixed
 
 In 3-band mode, placeholder emissivity layers are written for missing thermal bands to preserve output schema compatibility.
 
-### Reimplementation Notes
-
-For faithful porting and cross-language reproduction:
-
-1. Preserve LUT-driven radiance/temperature conversion in all retrieval paths.
-2. Preserve 3-band index remapping exactly.
-3. Keep two-pass RTTOV humidity-scaled branch when TG/WVS is enabled.
-4. Preserve post-TES cloud-mask ingestion and QC refinement ordering.
-5. Preserve scale/offset/fill-value packing conventions for product compatibility.
-
 ## References
 
 - Hulley, G. C., Göttsche, F. M., Rivera, G., Hook, S. J., Freepartner, R. J., Martin, M. A., Cawse-Nicholson, K., & Johnson, W. R. (2022). Validation and quality assessment of the ECOSTRESS Level-2 land surface temperature and emissivity product. *IEEE Transactions on Geoscience and Remote Sensing, 60*, 1–23. https://doi.org/10.1109/TGRS.2021.3079879
