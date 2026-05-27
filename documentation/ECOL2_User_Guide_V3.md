@@ -31,29 +31,25 @@ Note: The users' guide is designed to be a living document that describes the EC
 ## Change History Log
 
 | Revision | Effective Date | Prepared by | Description of Changes |
-| --- | --- | --- | --- |
+| :--- | :--- | :--- | :--- |
 | Draft | 6/4/2018 | Glynn Hulley | User Guide first draft based on MxD21/VNP21 products |
 | Version 1 | 10/23/2018 | Glynn Hulley | Remove bit 4 from cloud mask product (table 7). Other small edits and clarifications in document. |
 | Version 2 | 06/18/2019 | Glynn Hulley | Updates to account for MSU failure anomaly. |
-| Version 3 | 04/11/2022 | Robert Freepartner<br>
-
-<br>
-
-<br>Glynn Hulley | Revision for ECOSTRESS Collection 2 (build 7*) |
+| Version 3 | 04/11/2022 | Robert Freepartner<br>Glynn Hulley | Revision for ECOSTRESS Collection 2 (build 7*) |
 | Version 4 | 10/5/2022 | Glynn Hulley | Final revision for ECOSTRESS Collection 2 to include a confidence level mask (build 7*) |
 | Version 4.2 | 08/12/2024 | Glynn Hulley | Corrections to QC description of bit masks to account for cloud information not getting propagated to the QC bit mask in Collection 2. |
 | Version 5 | 12/10/2025 | Glynn Hulley | Updates for Collection 3 |
 
 ## Contacts
 
-Readers seeking additional information about this product may contact the following:
-Glynn C. Hulley (PI)
-MS 183-509
-Jet Propulsion Laboratory
-4800 Oak Grove Dr.
-Pasadena, CA 91109
-Email: glynn.hulley@jpl.nasa.gov
-Office: (818) 354-2979
+Readers seeking additional information about this product may contact the following:<br>
+Glynn C. Hulley (PI)<br>
+MS 183-509<br>
+Jet Propulsion Laboratory<br>
+4800 Oak Grove Dr.<br>
+Pasadena, CA 91109<br>
+Email: glynn.hulley@jpl.nasa.gov<br>
+Office: (818) 354-2979<br>
 
 ## Contents
 
