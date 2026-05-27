@@ -1,18 +1,15 @@
-# ECOL2 User Guide V3
+# ECOsystem Spaceborne Thermal Radiometer Experiment on Space Station (ECOSTRESS) Mission Level 2 Product User Guide for Collection 3
+
+May 27th, 2026
 
 JPL D-103137
-
-ECOsystem Spaceborne Thermal Radiometer
-Experiment on Space Station (ECOSTRESS) Mission
-Level 2 Product User Guide for Collection 3
-12 December, 2026
 
 Glynn Hulley, Tinh La, Robert Freepartner
 ECOSTRESS Algorithm Development Team
 Jet Propulsion Laboratory
 California Institute of Technology
 
-© 2024 California Institute of Technology. Government sponsorship acknowledged.
+© 2026 California Institute of Technology. Government sponsorship acknowledged.
 
 Paper copies of this document may not be current and should not be relied on for official purposes. The current version is in the ECOSTRESS DocuShare Library (*) at [https://bravo-lib.jpl.nasa.gov/docushare/dsweb/View/Library-509](https://www.google.com/search?q=https://bravo-lib.jpl.nasa.gov/docushare/dsweb/View/Library-509)
 (*) Access limited to user group
@@ -24,7 +21,7 @@ Pasadena, California 91109-8099
 California Institute of Technology
 
 This research was carried out at the Jet Propulsion Laboratory, California Institute of Technology, under a contract with the National Aeronautics and Space Administration. Reference herein to any specific commercial product, process, or service by trade name, trademark, manufacturer, or otherwise, does not constitute or imply its endorsement by the United States Government or the Jet Propulsion Laboratory, California Institute of Technology.
-© 2024. California Institute of Technology. Government sponsorship acknowledged.
+© 2026. California Institute of Technology. Government sponsorship acknowledged.
 
 Note: The users' guide is designed to be a living document that describes the ECOSTRESS Land Surface Temperature and Emissivity (LST&E) product. The document describes the current state of the art, and is revised as progress is made in the development and assessment of the LST product. The primary purpose of the document is to present an overview of the ECOSTRESS L2 data product to the potential user. For more detailed information on the physical basis and algorithm details please see the Algorithm Theoretical Basis Document (ATBD).
 
@@ -39,6 +36,7 @@ Note: The users' guide is designed to be a living document that describes the EC
 | Version 4 | 10/5/2022 | Glynn Hulley | Final revision for ECOSTRESS Collection 2 to include a confidence level mask (build 7*) |
 | Version 4.2 | 08/12/2024 | Glynn Hulley | Corrections to QC description of bit masks to account for cloud information not getting propagated to the QC bit mask in Collection 2. |
 | Version 5 | 12/10/2025 | Glynn Hulley | Updates for Collection 3 |
+| Version 6 | 05/27/2025 | Gregory Halverson | Conversion to Markdown format |
 
 ## Contacts
 
@@ -191,7 +189,7 @@ ECOv003_L2T_LSTE_11SQA_20250909T164037_0713_01_Emis5.tif
 ECOv003_L2T_LSTE_11SQA_20250909T164037_0713_01_Emis1_err.tif
 ECOv003_L2T_LSTE_11SQA_20250909T164037_0713_01_Emis2_err.tif
 ECOv003_L2T_LSTE_11SQA_20250909T164037_0713_01_Emis3_err.tif
-ECOv003_T2T_LSTE_11SQA_20250909T164037_0713_01_Emis4_err.tif
+ECOv003_L2T_LSTE_11SQA_20250909T164037_0713_01_Emis4_err.tif
 ECOv003_L2T_LSTE_11SQA_20250909T164037_0713_01_Emis5_err.tif
 ECOv003_L2T_LSTE_11SQA_20250909T164037_0713_01_cloud.tif
 ECOv003_L2T_LSTE_11SQA_20250909T164037_0713_01_water.tif
