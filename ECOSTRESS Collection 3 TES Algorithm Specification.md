@@ -1,20 +1,34 @@
-# tes_main.c Algorithm Guide
+# Integrated Operational & Institutional Product Algorithm Specification Document: Land Surface Temperature & Emissivity (LSTE) Processing Pipeline
 
-This document explains the end-to-end workflow implemented in `src/tes_main.c` at implementation-guide level. The goal is not to mirror the C syntax line by line, but to describe the processing stages, state transitions, formulas, branching rules, and output semantics well enough to re-implement the pipeline in another language.
+## Document Metadata
 
-The file combines three kinds of logic:
+* **Core Software Pipeline Version:** 3.0.3 (ECOSTRESS / NPP SIPS Framework / `src/tes_main.c`)
+* **Classification:** Open Science Processing Software Specification
+* **Document Version:** 3.0 (Consolidated Operational Architecture)
+* **Document Purpose:** Language-independent, deterministic blueprint combining abstract physical formulations with low-level C implementation details to ensure exact binary replication across heterogeneous computing environments.
 
-1. Product orchestration: configuration, file naming, metadata, output formatting.
-2. Physics workflow: NWP preparation, RTTOV execution, TG/WVS correction, TES retrieval.
-3. Product augmentation: cloud product generation, SST, uncertainty estimates, QA flags.
+---
 
-## Scope
+## 1. Pipeline Architecture & High-Level Control Flow
 
-This guide covers the behavior that is directly implemented in `tes_main.c`, plus the contracts that the file expects from helper modules such as ASTER GED loading, NWP readers, interpolation, smoothing, cloud generation, and metadata I/O.
+The LSTE pipeline operates as a modular data processing network, executing sequential multi-spectral matrix transformations over observed top-of-atmosphere (TOA) thermal infrared radiances to isolate thermodynamic skin components from atmospheric attenuation. The combined file logic manages product orchestration (configuration, metadata, output formatting), the physical workflow (NWP preparation, RTTOV execution, TG/WVS correction, TES retrieval), and product augmentation (cloud masks, SST, uncertainty estimates, QA flags).
 
-It does not re-specify the internal implementation of external helpers such as `read_aster_ged`, `tes_read_interp_atmos_*`, `mapnearest`, `multi_interp2`, `smooth2d`, or `process_cloud`. Instead, it explains how their outputs are consumed here.
+### 1.1 Structural Module Decomposition
 
-## High-Level Pipeline
+A functional implementation must isolate components into distinct programmatic modules to ensure testing boundary containment:
+
+* **Config Loader Module:** Decodes runtime process parameters, file naming conventions, and runtime properties from XML frameworks.
+* **L1 Reader Ingestion Interface:** Parses raw unscaled radiance tracks, data quality attributes, and sensor look-geometries across varying data layouts (HDF4, HDF5, NetCDF).
+* **NWP Adapter Normalization Block:** Adapts non-uniform weather models, handles data clamping constraints, and implements vertical water path fallback integrals.
+* **RTTOV Interface Engine:** Formats profiles into linear binary streams and executes clear-sky simulations via specialized shell commands.
+* **LUT Service Table Resolver:** Handles coordinate linear interpolations over non-uniform sensor calibration data arrays for temperature-radiance conversions.
+* **TG/WVS Modulating Scaler:** Resolves horizontal atmospheric water vapor paths, implements multi-pass smoothing, and isolates surface-leaving intensities.
+* **TES Kernel Separation Engine:** Executes iterative Planck corrections, relative emissivity scaling, and empirical minimum-emissivity curve fitting.
+* **Cloud Integration & Flagging Matrix:** Dynamically updates 16-bit uncertainty tracking variables, computes summary metrics, and processes scanner data anomalies.
+* **SST Split-Window Block:** Processes localized regressions over geolocated pixels independent of the surface type mask.
+* **Product Writer Packing Node:** Quantizes floating-point outputs into standardized structural formats, adding HDF-EOS metadata and sidecar files.
+
+### 1.2 High-Level Pipeline Flowchart
 
 ```mermaid
 flowchart TD
@@ -39,447 +53,331 @@ flowchart TD
     Q --> R[Compute SST]
     R --> S[Scale/pack datasets]
     S --> T[Write LSTE product, cloud product, metadata, sidecars]
+
 ```
 
-## Key Inputs And Outputs
+### 1.3 Core Data and State Tensors
 
-| Item | Role in workflow |
+The central data arrays span active channels ($b$), rows ($r$ or line), and columns ($c$ or pixel):
+
+| Tensor Variable | Scientific Meaning / Role | Memory Layout / Dimensions |
+| --- | --- | --- |
+| `Y[b, r, c]` | Observed TOA Radiance from L1 product | `[n_channels, n_lines, n_pixels]` |
+| `t1r[b, r, c]` | Atmospheric Transmittance from unscaled Pass 1 | `[n_channels, n_lines, n_pixels]` |
+| `t2r[b, r, c]` | Atmospheric Transmittance from scaled Pass 2 | `[n_channels, n_lines, n_pixels]` (Optional) |
+| `pathr[b, r, c]` | Upwelling Atmospheric Path Radiance | `[n_channels, n_lines, n_pixels]` |
+| `skyr[b, r, c]` | Downwelling Reflected Sky Radiance | `[n_channels, n_lines, n_pixels]` |
+| `pwv[r, c]` | Mapped Total Column / Precipitable Water Vapor | `[n_lines, n_pixels]` |
+| `surfradi[b, r, c]` | Surface-leaving Radiance after atmospheric correction | `[n_channels, n_lines, n_pixels]` |
+| `Tg[b, r, c]` | TG/WVS Brightness Temperature Surrogate | `[n_channels, n_lines, n_pixels]` |
+| `g[b, r, c]` | Unfiltered Moisture Scaling Gamma Factor | `[n_channels, n_lines, n_pixels]` |
+| `gi[b, r, c]` | Smoothed Gamma Filter Field for blending runs | `[n_channels, n_lines, n_pixels]` |
+| `Ts[r, c]` | Evaluated Land Surface Temperature (LST) | `[n_lines, n_pixels]` |
+| `emisf[b, r, c]` | Decoupled Narrowband Surface Emissivity Spectra | `[n_channels, n_lines, n_pixels]` |
+| `QC[r, c]` | Unified 16-Bit Quality Control Flags Field | `[n_lines, n_pixels]` |
+
+---
+
+## 2. Dynamic Spectral Band Conventions
+
+The pipeline dynamically configures internal matrix pointers and operational layouts based on instrument configuration metadata parsed from the input radiance layers. If the layout reports anything other than 3 or 5 active bands, the pipeline defaults to 3-band processing.
+
+| Attribute Dimension | 5-Channel Mode Alignment | 3-Channel Mode Alignment |
+| --- | --- | --- |
+| **Active Instrument Bands** | Bands 1, 2, 3, 4, 5 | Bands 2, 4, 5 |
+| **Processing Vector `band[]**` | `[0, 1, 2, 3, 4]` | `[1, 3, 4]` |
+| **Reverse Mapping `band_index[]**` | `[0, 1, 2, 3, 4]` | `[-1, 0, -1, 1, 2]` |
+| **Reference Thermal Index** | Index 3 (Physical Band 4) | Index 1 (Physical Band 4) |
+
+> **Implementation Note:** The internal compact index $b = 0 \dots n\_channels-1$ maps back to the physical sensor band number minus one via `band[]`. The TES kernel maps the temperature-driving channel to `lst_band_index = band_index[BAND_4]`. Band 4 serves as the continuous reference track for temperature derivations.
+
+---
+
+## 3. Mathematical Infrastructure and Primitive Utility Functions
+
+### 3.1 Piecewise Linear 1D Interpolation over Non-Uniform Spacing (`interp1d_npts`)
+
+Used for physical mapping inversions (such as inverting Planck functions or mapping sensor radiances), this function evaluates an independent query target against non-uniformly spaced lookup vector coordinates using a deterministic binary search tree.
+
+Given an array of independent sample points $X = [x_0, x_1, \dots, x_{N-1}]$ sorted in strict monotonic order, a matching array of dependent coordinates $Y = [y_0, y_1, \dots, y_{N-1}]$, and a target query coordinate $x_q$:
+
+1. **Orientation Check:** If $x_{N-1} < x_0$, the lookup framework is *descending*. If $x_{N-1} > x_0$, it is *ascending*.
+2. **Boundary Clamping:**
+* For **ascending** vectors: If $x_q \le x_0$, set the baseline index $k = 0$. If $x_q \ge x_{N-1}$, set $k = N - 2$.
+* For **descending** vectors: If $x_q \ge x_0$, set the baseline index $k = 0$. If $x_q \le x_{N-1}$, set $k = N - 2$.
+
+
+3. **Binary Search Traversal:** For any query falling within the remaining interior domain, execute a strict binary search to locate the boundary interval index $k$ such that:
+* $\text{Ascending: } x_k \le x_q \le x_{k+1}$
+* $\text{Descending: } x_k \ge x_q \ge x_{k+1}$
+
+
+4. **Linear Evaluation:** Compute the segment slope ($m$) and intercept ($b$) to calculate the final interpolated scalar result $y_q$:
+
+$$m = \frac{y_{k+1} - y_k}{x_{k+1} - x_k}$$
+
+
+$$b = y_{k+1} - m \cdot x_{k+1}$$
+
+
+$$y_q = m \cdot x_q + b$$
+
+
+
+### 3.2 Streaming 2D Mean Filter Optimization (`smooth2d`)
+
+Spatial filtering of multi-channel moisture scale parameters ($\gamma$) prevents high-frequency pixel noise from creating artifact boundaries in final data layers. This module optimizes performance by tracking running row and column updates to constrain runtime complexity to $O(\text{nrows} \cdot \text{ncols} \cdot 2)$, avoiding sliding-window slowdowns.
+
+For a target matrix $M$ of dimensions $R \times C$, with horizontal and vertical filtering radii designated as $N_r$ and $N_c$, the boundary evaluation window expands to $(2N_r + 1) \times (2N_c + 1)$. The logic must strictly follow these constraints:
+
+1. **NaN Isolation:** Any entry initialized to a Not-a-Number flag ($NaN$) must be omitted from all localized moving summary pools.
+2. **State Protection:** If an active index $M(r, c)$ evaluates to $NaN$, or if the localized coordinate window contains exclusively $NaN$ values, the pixel assignment must directly preserve the $NaN$ state into the output matrix.
+3. **Streaming Vector Updates:** Track column structures using an array of `SmoothingCol` structures maintaining a running `total` and active `count`. Shift execution windows sequentially by adding the leading boundary row/column elements and subtracting trailing edge parameters.
+
+### 3.3 Spherical Distance Tracking (`distance`)
+
+Distance queries between coordinates utilize a double-precision Haversine equation to account for planetary curvature:
+
+
+$$\Delta \phi = \text{lat}_2 - \text{lat}_1, \quad \Delta \lambda = \text{lon}_2 - \text{lon}_1$$
+
+$$a = \sin^2\left(\frac{\Delta \phi}{2}\right) + \cos(\text{lat}_1) \cdot \cos(\text{lat}_2) \cdot \sin^2\left(\frac{\Delta \lambda}{2}\right)$$
+
+$$d = 2 \cdot R_{\text{earth}} \cdot \text{atan2}\left(\sqrt{a}, \sqrt{1 - a}\right)$$
+
+
+Where the planetary radius constant is defined as $R_{\text{earth}} = 6371229.0\text{ m}$.
+
+---
+
+## 4. Global Science Primitives & Constant Coefficients
+
+### 4.1 Numerical and Physics Constraints
+
+* **Equivalence Tolerance ($\epsilon$):** $1.0 \times 10^{-9}$ (Threshold for absolute floating-point evaluations)
+* **Temperature Hard Bounds ($T_{min}, T_{max}$):** 150.0 K, 380.0 K (Boundary cutoffs for validity)
+* **Vegetation Max Emissivity Base ($e_{max, veg}$):** 0.985
+* **Bare Rock/Soil Max Emissivity Base ($e_{max, bare}$):** 0.970
+* **WVS Exponent Modifiers ($g_1, g_2$):** 1.0, 0.7
+* **Planck Constant Vectors:** $c_1 = 3.7418 \times 10^{-22}\text{ W}\cdot\text{m}^2$, $c_2 = 0.014388\text{ m}\cdot\text{K}$
+* **Band Model Calibration Vector ($W_{bmp}$):**
+
+$$W_{bmp} = [1.2818, 1.5693, 1.6595, 1.8217, 1.8031]$$
+
+
+
+### 4.2 Regression Parameter Arrays
+
+* **Wide-Band Emissivity Linear Regression Weights ($\alpha_{wb}$):**
+
+$$\alpha_{wb} = [0.0715, 0.0657, 0.1970, 0.3384, 0.3703, -0.0443]$$
+
+
+* **Emissivity Uncertainty Error Grid Coefficients ($X_e$ matrix of dimensions $5 \times 3$):**
+$$X_e = \begin{bmatrix}
+0.0153 &  0.0155 & -0.0018 \
+0.0121 &  0.0055 &  0.0004 \
+0.0128 &  0.0036 &  0.0009 \
+0.0110 &  0.0017 &  0.0005 \
+0.0114 & -0.0038 &  0.0025
+\end{bmatrix}$$
+* **Land Surface Temperature Error Estimation Weights ($X_t$ vector):**
+
+$$X_t = [0.3842, 0.5307, 0.0055]$$
+
+
+
+---
+
+## 5. Comprehensive Stage-by-Stage Operational Specification
+
+### Stage 1: Runtime Configuration and Parameter Loading
+
+To reproduce the configuration stage, begin by parsing the XML run configuration file passed via the execution command argument. Next, parse `PgeRunParameters.xml` from the configured Operational Support Product (OSP) location and stop immediately if its `PGEVersion` does not exactly evaluate to the compiled constant `PGE_VERSION` (`"3.0.3"`).
+
+After the two XML files are loaded, extract configuration variables including `NWP_DIR`, `L2_OSP_DIR`, `ProductPath`, `ProductCounter`, input filenames, `OrbitNumber`, and `SceneID`. Load the runtime parameter tunables (emissivity coefficients, TG/WVS thresholds, smoothing scales, RTTOV script paths, and LUT filenames), defaulting to hard-coded baselines whenever a parameter block is absent. Capture system environment signatures using Unix pipe utilities (`date -u` for processing timestamps, and `uname -a` to flag the physical processing cluster architecture). Finally, derive the output product filenames from the orbit number, scene ID, timestamp embedded in the radiance filename, and product counter.
+
+### Stage 2: Spectral Band Set Selection
+
+Inspect the input radiance layer header parameters via custom file interfaces. If the file specifies any architecture layout other than 3 or 5 operational channels, drop down to the 3-band configuration mode. In 3-band mode, configure internal loops to process exclusively thermal bands 2, 4, and 5, loading different coefficient sets and selecting a distinct RTTOV wrapper script tailored to the restricted band count. Assign the temperature-driving index configuration string: `lst_band_index = band_index[BAND_4]`.
+
+### Stage 3: L1 Radiance Ingest and Spatial Grid Boundary Mapping
+
+Initialize the internal core sensor metadata structure (`RAD`) and read the raw multi-spectral channel radiances. For system legacy configurations flagged as Collection 2, parse tracking views, terrain, and geometry coordinates out of a separate geolocation dataset (`L1B_GEO`).
+
+Construct the central double-precision radiance data tensor $Y[b, r, c]$ with shape `[n_channels, n_lines, n_pixels]`, copying each band image into its corresponding plane in processing order. Scan the array structure and convert any pixel tracking a radiance value below $0.0\text{ W}\cdot\text{m}^{-2}\cdot\text{sr}^{-1}\cdot\mu\text{m}^{-1}$ to a standard double-precision Not-a-Number flag ($NaN$). Concurrently, interrogate the spatial latitude and longitude grids to track extreme limits ($\text{minLat}, \text{maxLat}, \text{minLon}, \text{maxLon}$). This bounding coordinate envelope establishes the geographic clipping template for the subsequent NWP ingestion step.
+
+### Stage 4: Optional ASTER GED Land Surface Baseline Referencing
+
+If Water Vapor Scaling logic is globally active (`RunTgWvs = true`), pass the granule footprint coordinates, a water mask, and a zero-filled snow/water-index placeholder into the auxiliary ASTER data loader module (`read_aster_ged`) with parameters `adjust_aster = false` and `sensor_type = ECOSTRESS`.
+
+Project the $1^\circ \times 1^\circ$ land grids to match the target scene layout, outputting a continuous 2D surface matrix layer variable `emis_aster[line, pixel]`. Assign ocean pixels a fixed water-surface emissivity constant (0.990) and replace land-surface $NaN$ grid gaps with a standard nominal background value (0.962). If `RunTgWvs` is flagged as false, omit the subgrid queries entirely to conserve system execution paths.
+
+### Stage 5: Ingestion & Normalization of NWP Meteorological Profiles
+
+Identify the meteorological file structure type by inspecting the path string contained in `NWP_DIR` for key identifiers (`MERRA`, `GEOS`, `NCEP`, or `ECMWF`).
+
+* **MERRA:** Extract multi-layer absolute variables directly. Apply physical data clamps to vertical tracking elements ($T$, $Q$, $SP$) and invert the raw pressure level indexing order to conform to the top-to-bottom requirements of the forward radiative transfer model.
+* **GEOS:** Read the pre-cropped spatial weather variables. Record absolute input file pathways inside the global metadata tracking parameters and invert the pressure levels to match forward transfer formats.
+* **NCEP:** Parse the standard spatial meteorology matrix. Expand the horizontal grid resolution profile to double resolution by running multi-set bilinear spatial interpolation functions over the data layers while preserving the native vertical pressure indexing order.
+* **ECMWF:** Not operational; the code triggers an explicit failure path and exits.
+
+#### Humidity Matrix Inversion
+
+If the weather archive provides moisture profiles $Q_{profile}$ formatted as Relative Humidity ($RH$), translate the values into an absolute mass mixing ratio ($w_{mr}$) over liquid supercooled water via the Murphy and Koop (2005) formulation:
+
+$$\ln(e_s) = 54.842763 - \frac{6763.22}{T} - 4.210 \ln(T) + 0.000367 T + \tanh(0.0415(T - 218.8)) \cdot \left(53.878 - \frac{1331.22}{T} - 9.44523 \ln(T) + 0.014025 T\right)$$
+
+$$e = \frac{RH}{100.0} \cdot e_s$$
+
+$$w_{mr} = \left(\frac{e}{P_{levels} - e}\right) \cdot \frac{18.0152}{28.9644}$$
+
+#### Total Column Water Fallback Integration
+
+If the weather data format completely lacks explicit precipitable water tracks, execute numerical trapezoidal integration across adjacent vertical layers where localized pressures map below the true surface pressure limit:
+
+1. Convert PPMV humidity to g/kg via:
+
+$$k_{\mathrm{ppmv\to g/kg}} = \frac{1}{1000 \cdot (28.966 / 18.015)}$$
+
+
+2. Evaluate the integrated total columnar water content:
+
+$$\text{TCW} = \frac{\sum dq \cdot dp \cdot k_{\mathrm{ppmv\to g/kg}}}{100 \cdot 9.8} = \frac{1.0}{100.0 \cdot 9.8} \sum_{z=0}^{Z_{\text{surf}}-2} \left[ \frac{q_z + q_{z+1}}{2.0} \cdot \left(\frac{18.0152}{28.9644 \cdot 1000.0}\right) \cdot (P_{z+1} - P_z) \right]$$
+
+
+
+### Stage 6: Structural Forward Model Input Synthesis
+
+1. Convert discrete atmospheric `lat` and `lon` vectors into 2D meshgrids.
+2. Clip the weather fields to match the active scene domain. For GEOS datasets, the pre-cropped domain is directly preserved; for non-GEOS datasets, constrain bounds to the geographic scene extrema plus an extra spatial padding margin of $\pm 2.0^\circ$ in both latitude and longitude.
+3. Slice the weather profile states into cropped data arrays (`cropT`, `cropQ`, `cropSP`, `cropTCW`, and optional `cropskt`, `cropt2`, `cropq2`).
+4. Project satellite look geometries using nearest-neighbor coordinate mapping from the fine satellite tracks onto the coarse weather subgrid to extract localized surface terrain elevations (`cropHsurf`) and view zeniths (`cropSatZen`).
+5. Select the surface skin temperature tracker ($T_{\text{skin}}$): Ingest the explicit weather surface skin temperature layer (`cropskt`) if present; otherwise, substitute the data array from the lowest vertical atmospheric temperature profile level.
+6. Initialize the background surface emissivity placeholder matrix (`Bemis`) as a static array filled entirely with the constant value $1.0 \times 10^{-6}$ across all dimensions. The program does not pass physically varying emissivity fields into RTTOV at this stage.
+
+### Stage 7: Profile Stream Flattening and Validation
+
+Reshape the cropped weather data structures into continuous, unrolled arrays configured for the binary interface parameters of the forward radiative model script via the `set_rttov_atmos` routine.
+
+* **Validation and Data Repair Rules:**
+* Repair negative or missing vertical profiles: If a temperature value drops below zero or equals the data error code ($0.0001\text{ K}$), override the entry using the global spatial mean calculated across valid profile segments.
+* If a skin temperature element ($TSurf\_skt$) drops below the absolute low boundary threshold (90 K), overwrite the entry using the valid grid temperature mean, clamping to ensure it never drops below 90 K.
+* If near-surface moisture elements report missing values or zeros where RTTOV requires positivity, pull data from the lowest valid positive level in the vertical humidity profile.
+* Derive `t2` and `q2` if not explicitly supplied, transposing arrays into the memory order expected by the legacy MATLAB/RTTOV interface.
+
+
+* Apply a modulo mapping step ($\text{lon} \leftarrow \text{fmod}(\text{lon} + 360.0, 360.0)$) to transform longitudes into a $[0^\circ, 360^\circ)$ coordinate system. This transformation must execute *exclusively* during the initial binary profile stream construction pass (`prof_in.bin`).
+
+### Stage 8: Forward Simulation Execution Loop
+
+The system executes the forward radiative transfer engine script using a dual-pass simulation loop:
+
+1. **Pass 1 Simulation (`wvs_case = 0`):** Write the baseline unscaled binary profile `prof_in.bin`. Invoke the configured shell wrapper execution call (`script exe coef`) and read the resulting forward calculations from disk (`rad_out.dat`).
+2. **Pass 2 Simulation (`wvs_case = 1`):** Executed only if TG/WVS is enabled. Re-scale the humidity profiles across all dimensions (the full 3D profile $Q$, the flattened profile $Qt$, and the surface humidity $Q2$) by a strict factor of 0.7:
+
+$$Q_{\text{scaled}} = Q \cdot 0.7$$
+
+
+
+Export this humidity-suppressed dataset to `prof_in.bin` and run the simulation wrapper script a second time to output the updated `rad_out.dat` text dataset.
+
+### Stage 9: Swath Geolocation Remapping & Atmospheric Lookup Synthesis
+
+Parse the text data streams (`rad_out.dat`) generated during the simulation passes. `read_interp_rttov` converts internal wavenumber results into pure micrometer radiance tracking fields ($\text{mW}\cdot\text{m}^{-2}\cdot\text{sr}^{-1}\cdot\mu\text{m}^{-1}$) by running continuous piecewise linear interpolations over a radiance-conversion lookup table.
+
+Map the coarse simulation grid outputs onto the fine satellite swath tracks by running multi-set bilinear interpolation functions (`multi_interp2`). This isolates the pixel-level spatial matrices: $t_{1r}$ (Pass 1 transmittance), $t_{2r}$ (Pass 2 transmittance, if active), $path_r$ (upwelling atmospheric path radiance), $sky_r$ (downwelling reflected sky radiance), and the scene precipitable water vapor grid (`pwv`). If no pixel maps to a positive Pass 1 transmittance, flag the track as unusable and terminate processing early.
+
+### Stage 10: Radiative Calibration Lookup Ingestion
+
+Read the static 6-column multi-spectral radiance-to-temperature calibration file (`rad_lut_file`) into memory. Stop execution if the lookup matrix contains fewer than two distinct row records, as this violates boundary conditions for numeric interpolation stability.
+
+| LUT Column Index | Operational Structural Parameter Meaning |
 | --- | --- |
-| L1CG_RAD or L1B_RAD | Source radiance data per thermal band |
-| L1B_GEO | Collection 2 geometry source only |
-| ASTER GED | Optional auxiliary emissivity input used by TG/WVS |
-| NWP source | Atmospheric profiles, pressure, skin temperature, water vapor, total column water |
-| RTTOV executable + coefficients | Forward model that produces atmospheric transmission and path radiance |
-| Brightness temperature / radiance LUT | Converts between radiance and brightness temperature |
-| SST coefficient LUTs | Supplies geographically varying SST regression coefficients |
-| Main outputs | LST, SST, emissivity bands, emissivity errors, LST error, PWV, QC, cloud mask, water mask, view angle, height |
+| `lut[0]` | Brightness Temperature Grid Boundaries (K) |
+| `lut[1]` | Radiance Profile for Thermal Band 1 |
+| `lut[2]` | Radiance Profile for Thermal Band 2 |
+| `lut[3]` | Radiance Profile for Thermal Band 3 |
+| `lut[4]` | Radiance Profile for Thermal Band 4 |
+| `lut[5]` | Radiance Profile for Thermal Band 5 |
 
-## Band Conventions
+This matrix is maintained in memory as an indexed array to optimize continuous piecewise search requests within the primary solver loops, including Planck inversions, blackbody transformations, and SST regressions.
 
-The code supports either 5 thermal channels or a reduced 3-band mode.
+### Stage 11: Atmospheric and Moisture Attenuation Correction
 
-| Mode | Loaded thermal bands | `band[]` values | LST reference band |
-| --- | --- | --- | --- |
-| 5-band | 1, 2, 3, 4, 5 | `[0,1,2,3,4]` | Band 4 |
-| 3-band | 2, 4, 5 | `[1,3,4]` | Band 4 |
+#### 11A. Standard Atmospheric Inversion Path (No WVS)
 
-Internal arrays are always indexed by the compact processing index `b = 0..n_channels-1`. The `band[]` array maps that compact index back to the physical ECOSTRESS thermal band number minus one. `band_index[]` provides the reverse lookup.
+If WVS processing flags are disabled, calculate the surface-leaving radiances ($surfradi$) directly from the Pass 1 forward model parameters across all coordinates:
 
-## Core State Variables
 
-| Variable | Meaning |
-| --- | --- |
-| `Y[b,line,pixel]` | Observed TOA radiance from the L1 radiance product |
-| `t1r[b,line,pixel]` | RTTOV atmospheric transmission from the first run |
-| `t2r[b,line,pixel]` | RTTOV atmospheric transmission from the second, water-vapor-scaled run |
-| `pathr[b,line,pixel]` | Upwelling atmospheric path radiance |
-| `skyr[b,line,pixel]` | Downwelling reflected sky radiance |
-| `pwv[line,pixel]` | Total column water vapor interpolated back to granule geometry |
-| `surfradi[b,line,pixel]` | Surface-leaving radiance after atmospheric correction |
-| `Tg[b,line,pixel]` | TG/WVS brightness temperature surrogate |
-| `g[b,line,pixel]` | Raw WVS gamma parameter |
-| `gi[b,line,pixel]` | Smoothed gamma used to blend two RTTOV runs |
-| `Ts[line,pixel]` | Final land surface temperature |
-| `emisf[b,line,pixel]` | Final emissivity per thermal band |
-| `QC[line,pixel]` | 16-bit quality flag populated incrementally |
+$$surfradi[b, r, c] = \frac{Y[b, r, c] - pathr[b, r, c]}{t1r[b, r, c]}$$
 
-## Stage 1: Configuration And Runtime Parameter Loading
+#### 11B. Water Vapor Scaling (WVS) Correction Path
 
-The program expects a single command-line argument: the XML run configuration file.
+If WVS operations are active, resolve moisture variations across the spatial grids using an empirical dual-pass optimization loop:
 
-At startup it:
+1. **Compute $Tg$:** Invoke the external sub-module `tg_wvs` to calculate surrogate surface brightness temperatures ($Tg$) using observed radiances $Y$, precipitable water vapor (`pwv`), satellite zenith look angles (`Satzen`), day/night flags, WVS coefficients, and the baseline ASTER-GED array layer (`emis_aster`).
+2. **Convert $Tg$ to Blackbody Radiance:** Map the extracted $Tg$ fields into equivalent blackbody-leaving radiances ($B$) via linear lookup interpolation against the calibration table:
 
-1. Initializes metadata containers.
-2. Configures logging.
-3. Captures the production timestamp via `date -u`.
-4. Captures the processing environment via `uname -a`.
-5. Parses the run config XML and extracts:
-   - `NWP_DIR`
-   - `L2_OSP_DIR`
-   - `ProductPath`
-   - `ProductCounter`
-   - input filenames
-   - `OrbitNumber`
-   - `SceneID`
-6. Parses `PgeRunParameters.xml` from the OSP directory.
-7. Verifies that `PGEVersion` in the run parameters matches the compiled constant.
-8. Loads a large set of runtime tunables, including:
-   - emissivity model coefficients
-   - TG/WVS thresholds
-   - smoothing scales
-   - RTTOV executable/script names
-   - LUT filenames
-   - ASTER directory override
+$$B = \text{interp}( \text{temperature} = Tg \rightarrow \text{band radiance} )$$
 
-### Verbal Instructions
 
-To reproduce the configuration stage, begin by parsing the XML run configuration file passed on the command line. Next, parse `PgeRunParameters.xml` from the OSP directory and stop immediately if its `PGEVersion` does not match the executable's compiled version string.
+3. **Compute Raw Moisture Scaling Gamma Factors:** For each individual band channel, evaluate the raw parameter matrix ($g$). Let $g_f = g_2^{W_{bmp}[band[b]]}$, where $g_2 = 0.7$ and $W_{bmp}$ represents the band model parameters.
 
-After the two XML files are loaded, extract the NWP directory, OSP directory, product output path, product counter, input filenames, orbit number, and scene ID from the run configuration. Then load the runtime parameters, using the hard-coded defaults whenever a parameter is absent. Finally, derive the output product filenames from the orbit number, scene ID, timestamp embedded in the radiance filename, and product counter.
+$$\text{term1} = \frac{t2r}{t1r^{g_f}}, \quad \text{term2t} = \frac{B - \frac{pathr}{1.0 - t1r}}{Y - \frac{pathr}{1.0 - t1r}}, \quad \text{term3} = \frac{t2r}{t1r}$$
 
-## Stage 2: Band Selection
 
-The program reads the radiance product metadata to determine whether the granule carries 3 or 5 thermal bands.
 
-Behavior:
+If any pixel maps to a non-positive or undefined $NaN$ state for variable $\text{term2t}$ within any band, invalidate the entire coordinate column index across all processing dimensions. Calculate:
 
-1. If the radiance file reports anything other than 3 or 5 bands, the code falls back to 3-band mode.
-2. In 3-band mode, it processes only thermal bands 2, 4, and 5.
-3. It loads different coefficient sets and a different RTTOV wrapper script depending on the band count.
+$$\text{term2} = \text{term2t}^{(g_1 - g_f)} \quad (\text{where } g_1 = 1.0)$$
 
-### Important implementation detail
 
-The TES kernel later uses `lst_band_index = band_index[BAND_4]`, so band 4 is always the temperature-driving channel when computing LST from corrected radiance.
+$$g = \frac{\ln(\text{term1} \cdot \text{term2})}{\ln(\text{term3})}$$
 
-## Stage 3: Read L1 Radiance And Geometry
 
-The code initializes a `RAD` structure, reads the thermal radiance bands, and, for Collection 2 only, reads geometry from a separate GEO file.
 
-It then stacks the selected radiance planes into a 3-D array `Y` with shape:
+If logarithmic operations yield an undefined or complex scalar result, substitute a static value of 1.0.
+4. **Modify Gamma to $gi$:** Because the internal land surface type mask defaults to land cover (`gp_water = 1` everywhere), apply a greybody structural tracking step that overrides scaling values across all channels using the primary moisture validation track from Channel 5:
 
-```text
-Y[n_channels, n_lines, n_pixels]
-```
+$$g[b, r, c] = g[\text{Index 4}, r, c]$$
 
-This is the central radiance tensor used throughout the retrieval.
 
-The code also derives a lat/lon bounding box from the granule geolocation for later NWP cropping.
 
-### Verbal Instructions
-
-To reproduce the L1 ingest stage, read the selected thermal radiance bands into the `RAD` structure and, when processing Collection 2 data, also read the separate GEO file. Allocate a 3-D radiance tensor `Y` with one plane per processed band, then copy each band image into its corresponding plane in processing order.
-
-Once the radiance and geometry are loaded, scan the latitude and longitude grids to determine the minimum and maximum latitude and longitude present in the granule. Use those extrema to define the geographic crop bounds for the later NWP extraction step.
-
-## Stage 4: Optional ASTER GED Load
-
-If `RunTgWvs` is enabled, the code loads ASTER GED emissivity over the granule footprint.
-
-Inputs supplied to the ASTER helper:
-
-- granule latitude grid
-- granule longitude grid
-- water mask
-- zero-filled snow/water-index placeholder
-- `adjust_aster = false`
-- `sensor_type = ECOSTRESS`
-
-Output consumed here:
-
-- `emis_aster[line,pixel]`
-
-If TG/WVS is disabled, ASTER GED is skipped entirely.
-
-## Stage 5: Read And Normalize NWP Atmosphere
-
-The code chooses the NWP reader by inspecting whether `NWP_DIR` contains a configured key such as `MERRA`, `GEOS`, `NCEP`, or `ECMWF`.
-
-### Source-specific behavior
-
-| Source | Behavior in `tes_main.c` |
-| --- | --- |
-| MERRA | Reads interpolated atmosphere directly, clamps T/Q/SP, reverses pressure levels for RTTOV |
-| GEOS | Reads a cropped atmosphere directly, records source filenames in metadata, reverses pressure levels for RTTOV |
-| NCEP | Reads native fields, expands the lat/lon grid to double resolution by interpolation, clamps fields, preserves pressure order |
-| ECMWF | Not implemented; code emits an error path |
-
-### NWP fields expected after this stage
-
-| Field | Meaning |
-| --- | --- |
-| `lat`, `lon` | NWP grid coordinates |
-| `lev` | Pressure levels |
-| `t[level,row,col]` | Atmospheric temperature |
-| `q[level,row,col]` | Water vapor mixing ratio |
-| `sp[row,col]` | Surface pressure |
-| `skt[row,col]` | Skin temperature, if present |
-| `t2[row,col]`, `q2[row,col]` | 2-meter state, if present |
-| `tcw[row,col]` | Total column water, if present |
-
-If `tcw` is missing, the code computes it later by integrating humidity over pressure.
-
-### TCW fallback formula
-
-If `nwpATM.tcw` is empty:
-
-1. Loop over each horizontal NWP point.
-2. Integrate adjacent humidity layers only where both levels are below surface pressure.
-3. Use trapezoidal averaging in pressure coordinates.
-4. Convert PPMV to g/kg with:
-
-$$
-k_{\mathrm{ppmv\to g/kg}} = \frac{1}{1000 \cdot (28.966 / 18.015)}
-$$
-
-5. Final TCW is:
-
-$$
-\mathrm{TCW} = \frac{\sum dq \cdot dp \cdot k_{\mathrm{ppmv\to g/kg}}}{100 \cdot 9.8}
-$$
-
-## Stage 6: Build RTTOV Grid Inputs
-
-This stage creates the coarse atmospheric grid that RTTOV will run on.
-
-### 6.1 Construct NWP mesh grids
-
-The code converts `nwpATM.lat` and `nwpATM.lon` vectors into 2-D mesh grids.
-
-### 6.2 Crop the NWP domain
-
-Behavior differs by source:
-
-- GEOS: already cropped, so the full read domain is used.
-- Other sources: crop to the granule extent plus a ±2 degree margin in both latitude and longitude.
-
-### 6.3 Extract cropped atmospheric fields
-
-The code slices the NWP data into cropped arrays:
-
-- `cropT[level,row,col]`
-- `cropQ[level,row,col]`
-- `cropSP[row,col]`
-- `cropTCW[row,col]`
-- optional `cropskt`, `cropt2`, `cropq2`
-- `cropLat[row,col]`, `cropLon[row,col]`
-
-### 6.4 Map granule geometry onto the cropped NWP grid
-
-Using nearest-neighbor remapping from granule geometry to the cropped NWP grid, it derives:
-
-- `cropSatZen[row,col]`
-- `cropHsurf[row,col]`
-
-### 6.5 Define surface temperature used by RTTOV
-
-The code chooses:
-
-- `Tskin = cropskt` if the NWP source supplied it
-- otherwise `Tskin = lowest atmospheric temperature level`
-
-### 6.6 Fill emissivity placeholder for RTTOV
-
-`Bemis` is initialized to `1e-6` for every band/grid point. The program does not pass a physically varying emissivity field into RTTOV here.
-
-## Stage 7: Prepare RTTOV Input Profiles
-
-`set_rttov_atmos` reshapes the cropped NWP data into the flattened binary layout expected by RTTOV.
-
-Its main responsibilities are:
-
-1. Repair negative or missing vertical temperatures.
-2. Derive `t2` and `q2` if not supplied.
-3. Copy pressure, temperature, humidity, surface state, height, lat/lon, zenith angle.
-4. Replace invalid zeros with small positive defaults where RTTOV requires positivity.
-5. Transpose arrays into the same memory order expected by the legacy MATLAB/RTTOV interface.
-
-### Behavior worth preserving
-
-- Surface WV defaults to the last positive WV profile value.
-- Surface T defaults to the last positive temperature profile value unless an explicit `t2` exists.
-- `TSurf_skt` values below 90 K are replaced by the mean valid skin temperature, but never below 90 K.
-- Longitudes are converted to `[0, 360)` only for the first RTTOV profile write.
-
-## Stage 8: RTTOV Execution
-
-The program may run RTTOV once or twice.
-
-### First RTTOV pass
-
-1. Write binary profile `prof_in.bin` with `wvs_case = 0`.
-2. Call the configured shell wrapper: `script exe coef`.
-3. Read `rad_out.dat`.
-
-### Second RTTOV pass
-
-Executed only if TG/WVS is enabled.
-
-1. Rewrite `prof_in.bin` with `wvs_case = 1`.
-2. In `wvs_case = 1`, the code scales humidity by `0.7`:
-   - full 3-D humidity profile `Q`
-   - flattened humidity profile `Qt`
-   - surface humidity `Q2`
-3. Run the same RTTOV wrapper again.
-4. Read the second `rad_out.dat`.
-
-### RTTOV outputs used later
-
-For each pass, the code extracts:
-
-- `Trans_rt` as atmospheric transmission
-- `RadUp_rt` as upwelling path radiance
-- `RadRefDn_rt` as downwelling sky radiance
-- interpolated `PWV`
-
-`read_interp_rttov` also converts RTTOV radiance units using a radiance-conversion LUT before interpolating results back to the granule geolocation.
-
-## Stage 9: Interpolate RTTOV Outputs Back To Granule Geometry
-
-After each RTTOV run, the coarse-grid outputs are remapped to the original granule grid using bilinear interpolation (`multi_interp2`).
-
-The final per-pixel fields are:
-
-| Field | Source |
-| --- | --- |
-| `t1r` | `RTM1.Trans_rt` |
-| `t2r` | `RTM2.Trans_rt` if TG/WVS enabled |
-| `pathr` | `RTM1.RadUp_rt` |
-| `skyr` | `RTM1.RadRefDn_rt` |
-| `pwv` | interpolated total column water |
-
-If no pixel has positive first-pass transmission, the granule is treated as unusable and the program exits early.
-
-## Stage 10: Load Brightness Temperature / Radiance LUT
-
-The code reads a 6-column LUT from `rad_lut_file`.
-
-The columns are used as:
-
-| LUT column | Meaning |
-| --- | --- |
-| `lut[0]` | Brightness temperature |
-| `lut[1]` | Radiance for thermal band 1 |
-| `lut[2]` | Radiance for thermal band 2 |
-| `lut[3]` | Radiance for thermal band 3 |
-| `lut[4]` | Radiance for thermal band 4 |
-| `lut[5]` | Radiance for thermal band 5 |
-
-This LUT is used repeatedly for:
-
-- radiance to brightness-temperature conversion
-- brightness temperature to blackbody radiance conversion
-- Planck inversion in NEM/TES
-- SST regression inputs
-- TG/WVS brightness conversions
-
-## Stage 11: Surface Radiance Correction
-
-This is the branch where the workflow diverges depending on whether TG/WVS is enabled.
-
-### 11A. Standard atmospheric correction, no TG/WVS
-
-For each band and pixel:
-
-$$
-\text{surfradi} = \frac{Y - \text{pathr}}{t1r}
-$$
-
-### 11B. TG/WVS atmospheric correction
-
-This branch is more elaborate and is central to the ECOSTRESS workflow.
-
-#### 11B.1 Compute `Tg`
-
-The external helper `tg_wvs` consumes:
-
-- `pwv`
-- `vRAD.Satzen`
-- `emis_aster`
-- observed radiance `Y`
-- day/night flag
-- WVS coefficients
-- brightness/radiance LUT
-
-It returns per-band brightness-like temperatures `Tg`.
-
-#### 11B.2 Convert `Tg` to blackbody-equivalent radiance `B`
-
-For each valid `Tg` value:
-
-$$
-B = \text{interp}(\text{temperature}=Tg \rightarrow \text{band radiance})
-$$
-
-#### 11B.3 Compute raw gamma terms
-
-For each band, define:
-
-$$
-g_f = g_2^{bmp[band]}
-$$
-
-with `g2` from runtime parameters and `bmp[]` as band model parameters.
-
-Then compute:
-
-$$
-\text{term1} = \frac{t2r}{t1r^{g_f}}
-$$
-
-$$
-\text{term2t} = \frac{B - \frac{pathr}{1 - t1r}}{Y - \frac{pathr}{1 - t1r}}
-$$
-
-$$
-\text{term3} = \frac{t2r}{t1r}
-$$
-
-If any band at a pixel produces NaN or a negative `term2t`, the code invalidates all bands at that pixel.
-
-Then:
-
-$$
-\text{term2} = \text{term2t}^{g_1 - g_f}
-$$
-
-$$
-g = \frac{\log(\text{term1} \cdot \text{term2})}{\log(\text{term3})}
-$$
-
-If this yields NaN, the code substitutes `g = 1.0`.
-
-#### 11B.4 Modify gamma to `gi`
-
-The code then post-processes `g` into `gi`.
-
-Rules:
-
-1. `gp_water` is initialized to all ones and never changed in this file.
-2. Because of that, every pixel follows the graybody branch:
-   - use band 5 gamma value for all bands.
-3. Cloudy pixels temporarily receive NaN in `gi` before smoothing.
-4. Non-cloudy `g` is clamped into `[-2, 3]` before smoothing.
-
-#### 11B.5 Choose smoothing and low-PWV override
-
-The code computes the mean band-4 `Tg` over land pixels.
-
-Decision:
+Convert cloudy pixels temporarily to $NaN$ and clamp the remaining valid land grid parameters to the range $[-2.0, 3.0]$.
+5. **Smoothing and Low-PWV Override Selection:** Calculate the spatial mean of Channel 4 $Tg$ values across all land coordinates. Select smoothing and threshold configurations via the following decision tree:
 
 ```mermaid
 flowchart TD
-    A[Compute mean Tg over land using band 4] --> B{TGmean < TGthresh?}
-    B -- Yes --> C[PWVthresh = PWVthresh1; smooth_scale = smooth_scale1]
-    B -- No --> D[PWVthresh = PWVthresh2; smooth_scale = smooth_scale2]
-    C --> E[If PWV < threshold, force gi = 1]
+    A[Compute mean Tg over land using band 4] --> B{TGmean < 290.0 K?}
+    B -- Yes --> C[PWVthresh = 2.5 cm; smooth_scale = 750]
+    B -- No --> D[PWVthresh = 2.0 cm; smooth_scale = 150]
+    C --> E[If PWV < PWVthresh, force gi = 1.0]
     D --> E
     E --> F[Smooth each band of gi with smooth2d]
-    F --> G[Reset cloudy pixels to gi = 1]
+    F --> G[Reset cloudy pixels to gi = 1.0]
+
 ```
 
-#### 11B.6 Blend the two RTTOV solutions
+6. **Blend the Dual-Pass RTTOV Solutions:** Reconstruct the blended atmospheric transmission ($t_i$) and path radiance ($path_i$) parameters to output the true surface-leaving radiance matrices ($surfradi$):
 
-For each band and pixel:
+$$t_i = t1r^{\frac{gi - g_f}{1.0 - g_f}} \cdot t2r^{\frac{1.0 - gi}{1.0 - g_f}}$$
 
-$$
-t_i = t1r^{\frac{gi - g_f}{1 - g_f}} \cdot t2r^{\frac{1 - gi}{1 - g_f}}
-$$
 
-$$
-path_i = pathr \cdot \frac{1 - t_i}{1 - t1r}
-$$
+$$path_i = pathr \cdot \left( \frac{1.0 - t_i}{1.0 - t1r} \right)$$
 
-$$
-surfradi = \frac{Y - path_i}{t_i}
-$$
 
-If `surfradi < 0`, it is converted to NaN.
+$$surfradi = \frac{Y - path_i}{t_i}$$
 
-## Stage 12: TES Retrieval
 
-The main TES kernel is `apply_tes_algorithm`. It operates independently at each pixel once `surfradi`, `skyr`, and `t1r` have been computed.
 
-### TES flowchart
+Any element evaluating to a non-positive surface radiance value is converted to a standard $NaN$ flag.
+
+---
+
+## 6. Core TES Temperature/Emissivity Separation Retrieval
+
+The core separation solver (`apply_tes_algorithm`) evaluates the spatial surface-leaving radiance matrices to resolve individual emissivity spectra and isolate true surface skin temperatures independently at each pixel footprint.
 
 ```mermaid
 flowchart TD
@@ -492,355 +390,261 @@ flowchart TD
     G --> H[Recover emissivity spectrum]
     H --> I[Convert corrected radiance in band 4 to LST]
     I --> J[Populate QC subfields]
+
 ```
 
-### 12.1 Coefficient family selection
+### 6.1 Coefficient Family Selection
 
-The code distinguishes two coefficient families:
+Inspect the surface type mask to set the initial maximum emissivity constraint ($e_{max}$). Because the surface water mask is initialized to land cover (`gp_water = 1`) across all indices and never modified in this routine, calculations consistently execute along the bare rock/soil path: $e_{max} = e_{max, bare} = 0.970$, using the corresponding empirical coefficient set $co_{bare}$.
 
-- `co_veg` with `emax_veg`
-- `co_bare` with `emax_bare`
+### 6.2 NEM / Planck Iteration Block (`NEM_planck`)
 
-However, in the current `tes_main.c` flow, `gp_water` is initialized to `1` everywhere and never updated. Therefore every pixel uses the `co_bare` / `emax_bare` path in this file as written.
+Given surface-leaving radiances, downwelling sky radiances, the maximum emissivity constraint, and a strict iteration limit of 13:
 
-### 12.2 NEM / Planck iteration (`NEM_planck`)
+* **Initialization:** Check every band input. If either the surface radiance or sky radiance is $NaN$ in any band, treat the retrieval as a failure immediately. For each band, compute an initial corrected radiance by subtracting the downwelling contribution implied by the maximum emissivity assumption:
 
-Given:
+$$R_b[band] = surfradi[band] - (1.0 - e_{max}) \cdot skyr[band]$$
 
-- `surfradin[band]`
-- `skyradin[band]`
-- scalar `emax`
-- iteration limit `it`
 
-the function iteratively solves for:
 
-- `ef[band]`: provisional emissivity spectrum
-- `Tnem`: maximum brightness temperature implied by that spectrum
-- `Re[band]`: corrected radiance after downwelling adjustment
+Convert each radiance into brightness temperature using the lookup table and set $T_{nem}$ to the warmest evaluated band temperature: $T_{nem} = \max(T[band])$. Convert $T_{nem}$ back to blackbody radiance ($B$) in each band and estimate the first emissivity spectrum as $e[band] = R_b / B$.
+* **Iterative Loop Execution:** In each iteration, recompute the corrected band radiance using the current emissivity estimate:
 
-#### Verbal Instructions
+$$R_{new}[band] = surfradi[band] - (1.0 - e[band]) \cdot skyr[band]$$
 
-To reproduce `NEM_planck`, begin by checking every band input. If either the surface radiance or sky radiance is NaN in any band, treat the retrieval as failed immediately.
 
-For each band, compute an initial corrected radiance by subtracting the downwelling contribution implied by the maximum emissivity assumption:
 
-$$
-R[band] = surfradi[band] - (1 - emax) \cdot skyradi[band]
-$$
+Convert $R_{new}$ back to temperature via the lookup table and update $T_{nem}$ as the maximum temperature across bands ($T_{nem} = \max(T_{\text{new}}[band])$). Compare the new corrected radiance with the previous iteration's radiance ($R_b$) in every band.
+* **Convergence Criteria:** If all bands change by less than 0.05 radiance units ($\Delta R = |R_{new} - R_b| < 0.05$) and at least three iterations have occurred, terminate the loop and return success.
+* **Divergence Criteria:** If all bands increase by more than 0.05 radiance units after at least three iterations, declare divergence and return failure. If the loop reaches the maximum iteration limit of 13 before stabilizing, also return failure and mark the pixel as unproduced.
+* **Refinement Increment:** When neither convergence nor divergence is reached, convert the current $T_{nem}$ back to blackbody radiance in every band, update emissivity as $e[band] = R_{new} / B$, store the current corrected radiance as the baseline value ($R_b = R_{new}$), and advance to the next iteration.
 
-Convert each of those radiances into brightness temperature using the LUT and set `Tnem` to the warmest band temperature. Then convert `Tnem` back to blackbody radiance in each band and estimate the first emissivity spectrum as `R / B`.
 
-After that initialization, iterate. In each iteration, recompute the corrected band radiance using the current emissivity estimate, convert that corrected radiance back to temperature, and update `Tnem` as the maximum temperature across bands. Compare the new corrected radiance with the previous corrected radiance in every band.
 
-If all bands change by less than 0.05 radiance units and at least three iterations have occurred, declare convergence and return success. If all bands increase by more than 0.05 radiance units after at least three iterations, declare divergence and return failure. If the maximum iteration count is reached before convergence, also return failure.
+### 6.3 Min-Max Difference (MMD) Operational Calibration
 
-When neither convergence nor divergence has been reached, convert the current `Tnem` back to blackbody radiance in every band, update emissivity as `Re / B`, store the current corrected radiance as the old value, and continue to the next iteration.
+After `NEM_planck` succeeds, normalize the raw emissivity components into scaling ratio parameters $\beta_2$ using the mean of processing bands 2 through 4 only to remove calibration offsets:
 
-### 12.3 Compute normalized emissivity contrast
 
-After `NEM_planck` succeeds, the TES kernel computes a normalized emissivity shape using the mean of bands 2 through 4 only.
+$$bm2 = \text{mean}(e_{bands\ 2..4})$$
 
-Let:
+$$\beta_2[i] = \frac{e[i]}{bm2}$$
 
-$$
-bm2 = \text{mean}(ef_{bands\ 2..4})
-$$
+Isolate the maximum spectral contrast range ($MMD_2$) across all operational bands:
 
-Then for every processed band:
 
-$$
-\beta_2[i] = \frac{ef[i]}{bm2}
-$$
+$$MMD_2 = \max(\beta_2) - \min(\beta_2)$$
 
-Let:
+Evaluate the empirical power-law regression equations using the bare soil calibration constants ($co = [0.9950, 0.7264, 0.8002]$) to calculate the minimum absolute surface emissivity floor value ($\epsilon_{min}$):
 
-$$
-MMD2 = \max(\beta_2) - \min(\beta_2)
-$$
 
-The minimum emissivity estimate is:
+$$\epsilon_{min} = co[0] - co[1] \cdot MMD_2^{co[2]}$$
 
-$$
-\epsilon_{min} = co[0] - co[1] \cdot MMD2^{co[2]}
-$$
+Re-scale the relative $\beta_2$ spectra to compute the final calibrated surface emissivities ($emisf$):
 
-Final emissivity per band is:
 
-$$
-emisf[i] = \beta_2[i] \cdot \frac{\epsilon_{min}}{\min(\beta_2)}
-$$
+$$emisf[i] = \beta_2[i] \cdot \left( \frac{\epsilon_{min}}{\min(\beta_2)} \right)$$
 
-### 12.4 Compute LST from corrected radiance
+### 6.4 Compute LST from Decoupled Radiance
 
-The code chooses the clearest channel, band 4, as the temperature channel.
+The pipeline selects Channel 4 as the clearest spectral channel ($b_{max}$). It calculates the final Land Surface Temperature variable ($Ts$) by running an inverse lookup interpolation over the final corrected radiance field:
 
-Let `bmax = band 4 processing index`.
 
-It computes:
+$$R_{eff,c} = \frac{surfradi[b_{max}] - (1.0 - emisf[b_{max}]) \cdot skyr[b_{max}]}{emisf[b_{max}]}$$
 
-$$
-R_{eff,c} = \frac{Reff[bmax]}{emisf[bmax]}
-$$
+$$Ts = \text{LUT\_radiance\_to\_temperature}(R_{eff,c}, \text{band 4})$$
 
-Then:
+If the band-4 emissivity estimate drops below 0.0, both $Ts$ and the entire emissivity vector for that pixel are zeroed out.
 
-$$
-Ts = LUT\_radiance\_to\_temperature(R_{eff,c}, \text{band 4})
-$$
+---
 
-If the band-4 emissivity estimate is negative, the code zeros both `Ts` and the whole emissivity vector for that pixel.
+## 7. Product Augmentation, Corrections, & Contextual Routines
 
-## Stage 13: Cloud Product Integration
+### Stage 13: Cloud Mask Integration & Summary Statistics Creation
 
-The code delegates cloud generation to `process_cloud`, passing:
+The pipeline delegates cloud processing to the external module `process_cloud`, passing observed radiances, geometry metadata, collection numbers, and the preliminary TES emissivity arrays. The module converts radiances to brightness temperatures, evaluates regional meteorological thresholds, and exports the final binary cloud mask matrix (`Cloud_final`) under path `/HDFEOS/GRIDS/ECO_L2G_CLOUD_70m/Data Fields/Cloud_final`.
 
-- radiance and geometry (`vRAD`)
-- cloud LUT path
-- radiance LUT
-- collection number
-- TES emissivity field
+The main loop re-opens this cloud dataset, extracts the spatial tracking layer, and uses it to update LSTE QC fields and derive global cloud-cover attributes.
 
-After the cloud product is written, `tes_main.c` re-opens it and reads:
+#### Cloud Summary Metadata Compilation
 
-- `/HDFEOS/GRIDS/ECO_L2G_CLOUD_70m/Data Fields/Cloud_final`
+For pixels flagged as cloud-covered (`cloud == 1`), calculate an approximate cloud-top temperature proxy by applying an environmental lapse-rate adjustment over surface terrain heights:
 
-This cloud mask is then used to:
 
-- update LSTE QC
-- derive cloud-cover metadata
-- write the final `cloud_mask` dataset into the LSTE output
+$$\text{BT}_{11} = \text{Base\_Threshold} - \text{Height} \cdot \text{slapse}$$
 
-### Cloud summary metadata computed here
 
-For pixels where `cloud == 1`, the code estimates an approximate cloud-top brightness temperature proxy using elevation lapse-rate correction and land/ocean thresholds.
+Record the final descriptive statistical parameters (percent cloud cover; mean, minimum, maximum, and standard deviation of the cloud temperature proxy) into the global product metadata structures.
 
-It records:
+### Stage 14: Wideband Emissivity Synthesis
 
-- percent cloud cover
-- mean, min, max, and standard deviation of cloud temperature proxy
+Calculate the integrated wideband emissivity product ($EmisWB$) by executing a linear combination of the final narrowband emissivity layers:
 
-## Stage 14: Wideband Emissivity
 
-Wideband emissivity is a linear combination of narrowband emissivities.
+$$EmisWB = c_0 + \sum_b c_b \cdot emisf[b]$$
 
-For each pixel:
 
-$$
-EmisWB = c_0 + \sum_b c_b \cdot emisf[b]
-$$
+The regression weights ($c_b$) and the constant offset parameter ($c_0 = \alpha_{wb}[n\_channels]$) are loaded dynamically from the configuration files to match either the 3-band or 5-band sensor mode.
 
-where the constant term is stored in `emis_wb_coeffs[n_channels]`.
+### Stage 15: Error Estimation and QA Flag Refinement
 
-The coefficients differ between 3-band and 5-band processing and are loaded from runtime parameters.
+#### 15.1 Parametric Uncertainty Calibration
 
-## Stage 15: Error Estimates And QA Flag Refinement
+Absolute uncertainty parameters are calculated across each pixel using empirical polynomial regressions driven by the total column water vapor field ($TCW = pwv[line, pixel]$) and sensor zenith look angles ($SVA = Satzen[line, pixel]$):
 
-The file computes emissivity and temperature uncertainty after TES and cloud processing.
+* **Narrowband Emissivity Uncertainty ($d\epsilon_b$):**
 
-### 15.1 Parametric uncertainties
+$$d\epsilon_b = X_e[b][0] + X_e[b][1] \cdot TCW + X_e[b][2] \cdot TCW^2$$
 
-For each band:
 
-$$
-d\epsilon_b = xe[b][0] + xe[b][1] \cdot TCW + xe[b][2] \cdot TCW^2
-$$
+* **Surface Temperature Uncertainty ($dT$):**
 
-For temperature:
+$$dT = X_t[0] + X_t[1] \cdot TCW + X_t[2] \cdot SVA$$
 
-$$
-dT = xt[0] + xt[1] \cdot TCW + xt[2] \cdot SVA
-$$
 
-where:
+* **Total Emissivity Root-Mean-Square Error ($RMSE_{\epsilon}$):**
 
-- `TCW = pwv[line,pixel]`
-- `SVA = vRAD.Satzen[line,pixel]`
+$$RMSE_{\epsilon} = \sqrt{\frac{1}{n_{channels}} \sum_b (d\epsilon_b)^2}$$
 
-The code also computes RMSE across emissivity bands:
 
-$$
-RMSE_\epsilon = \sqrt{\frac{1}{n_{channels}} \sum_b d\epsilon_b^2}
-$$
 
-### 15.2 QC bits populated in this file
+#### 15.2 Incomplete Input Scan Profiling
 
-The code writes multiple bit groups into the 16-bit `QC` value. The exact semantic naming is inherited from product conventions, but the operational meaning in `tes_main.c` is:
+The system scans the input radiance line quality codes (`DataQ`). If a band records a missing scan line that was filled using neural-network spatial inpainting loops (`DataQ == 1`), the pipeline updates the QC flag configuration and inflates the local uncertainty metrics to reflect reduced data confidence:
 
-| Bits | Meaning in this file |
-| --- | --- |
-| 0-1 | Mandatory state: good / nominal / cloudy / not produced |
-| 2-3 | Missing scan / missing bad input state |
-| 6-7 | NEM convergence quality based on iteration count |
-| 8-9 | Sky radiance contamination test from `skyr_band2 / Y_band2` |
-| 10-11 | MMD-based spectral contrast quality |
-| 12-13 | Emissivity uncertainty quality tier |
-| 14-15 | LST uncertainty quality tier |
 
-### 15.3 Missing scan adjustments
+$$dT \leftarrow dT + 0.34\text{ K}$$
 
-The radiance input carries per-band `DataQ` values. The code interprets them as:
+$$d\epsilon_b \leftarrow d\epsilon_b + \text{Emis\_ScanErr}[b]$$
 
-| `DataQ` value | Effect |
-| --- | --- |
-| 1 | Missing scan filled by neural net |
-| 2 | Missing scan not filled |
-| 3 | Missing/bad |
-| 4 | Not seen |
 
-If any band has `2`, `3`, or `4`, the pixel is marked not produced.
+Where $\text{Emis\_ScanErr} = [0.0099, 0.0053, 0.0050, 0.0047, 0.0023]$. If any band records an un-fillable, corrupt, or missing data line (`DataQ` value of 2, 3, or 4), the pixel is marked as unproduced, and the data layers are forced to the standard fill state.
 
-If any band has `1`, the code:
+#### 15.3 Core Validation Gatekeeper Constraints
 
-- updates QC bits 2-3 and possibly 0-1
-- inflates LST error by `0.34 K`
-- inflates emissivity error by a band-specific additive term
+* If $Ts < 100.0\text{ K}$, flag the calculation as anomalous, force the data layers to $NaN$, and update the QC mask to an unproduced state.
+* If $Ts > 380.0\text{ K}$, retain the nominal evaluation but modify the QC mask to flag the pixel as nominal but suspicious.
+* If $Ts$ evaluates to $NaN$ while the QC mask reports a valid retrieval, override the flag and force it to an unproduced state.
+* For any pixel marked as unproduced, ensure that both $Ts$ and all narrowband emissivity parameters are forced to $NaN$.
 
-### 15.4 Final sanity checks
+### Stage 16: Sea Surface Temperature (SST) Processing
 
-For each pixel:
+The pipeline calculates Sea Surface Temperature ($SST$) values independently from the land core routines across all geolocated pixels, ignoring the land/water mask boundaries:
 
-1. If `Ts < 100 K`, mark as invalid and set QC to not produced.
-2. If `Ts` is NaN but QC still implies produced, force QC to not produced.
-3. If `Ts > 380 K`, mark as nominal but suspicious rather than good.
-4. If QC says not produced, force `Ts` and all `emisf` bands to NaN.
+1. Isolate the scene's temporal properties to open the matching monthly/hourly NetCDF coefficient file (`ECOSTRESS_SSTv3_Coeffs_MM_HH.nc`) corresponding to the nearest 6-hour UTC bin ($00, 06, 12, \text{ or } 18$).
+2. Crop the coarse coefficient structures and bilinearly interpolate them onto the satellite coordinates using tracking vectors from `LST_SST_Geolocation.nc` to produce continuous local coefficient fields ($xeco1, xeco2, xeco3, xeco4$).
+3. Resolve brightness temperatures $TB_4$ and $TB_5$ by passing observed radiances ($Y$) through the lookup functions, extracting the channel targets based on the active operational band mode:
+* **3-Band Mode:** $TB_4 \leftarrow Y[1]$, $TB_5 \leftarrow Y[2]$
+* **5-Band Mode:** $TB_4 \leftarrow Y[3]$, $TB_5 \leftarrow Y[4]$
 
-## Stage 16: Sea Surface Temperature
 
-SST is computed separately from TES.
+4. Evaluate the non-linear split-window regression equation to output the sea surface temperature field ($T_{sea}$):
 
-### 16.1 Load coefficient files
+$$\sec(\theta) = \frac{1.0}{\cos\left(\theta \cdot \frac{\pi}{180.0}\right)}$$
 
-The code chooses one monthly/hour-bin SST coefficient file:
 
-```text
-ECOSTRESS_SSTv3_Coeffs_MM_HH.nc
-```
+$$SST = xeco1 + xeco2 \cdot TB_4 + xeco3 \cdot (TB_4 - TB_5) + xeco4 \cdot (1.0 - \sec(\theta)) \cdot (TB_4 - TB_5)$$
 
-where `HH` is the nearest of four bins associated with approximately 0, 6, 12, or 18 UTC.
 
-It reads:
 
-- `LUT_SST_coeff1`
-- `LUT_SST_coeff2`
-- `LUT_SST_coeff3`
-- `LUT_SST_coeff4`
+---
 
-It also reads `LST_SST_Geolocation.nc` to obtain the coefficient-grid latitude and longitude.
+## 8. Quantization, Packing, and Serialization
 
-### 16.2 Crop and interpolate coefficients
+### Stage 17: Quantization and Output Data Packing
 
-The coefficient grids are cropped to the granule extent plus ±2 degrees, then bilinearly interpolated to the ECOSTRESS granule grid, producing per-pixel coefficient fields:
+The completed double-precision floating-point arrays are compressed into fixed-point integer products before file serialization. The quantization step executes a standard rounding truncation mapping:
 
-- `xeco1`
-- `xeco2`
-- `xeco3`
-- `xeco4`
 
-### 16.3 Compute SST from observed brightness temperatures
+$$\text{Packed\_Int} = \text{floor}\left( \frac{\text{Double\_Value} - \text{Offset}}{\text{Scale}} + 0.5 \right)$$
 
-The code converts observed radiance `Y` back to brightness temperatures for bands 4 and 5.
+The output data packing must strictly follow the specifications listed below:
 
-Band index selection differs by mode:
-
-| Mode | `TB4` source | `TB5` source |
-| --- | --- | --- |
-| 3-band | `Y[1]` | `Y[2]` |
-| 5-band | `Y[3]` | `Y[4]` |
-
-Then for each valid pixel:
-
-$$
-sec\_satzen = \frac{1}{\cos(\theta)}
-$$
-
-$$
-SST = xeco1 + xeco2 \cdot TB4 + xeco3 \cdot (TB4 - TB5) + xeco4 \cdot (1 - sec\_satzen) \cdot (TB4 - TB5)
-$$
-
-This stage does not branch on the water mask. It computes `Tsea` for all valid geolocated pixels.
-
-## Stage 17: Scale And Pack Output Datasets
-
-Internal retrievals are stored as doubles. Before writing the final HDF5 product, the code scales them into packed integer products.
-
-### Output scaling
-
-| Dataset | Internal units | External type | Scale | Offset |
+| HDF5 Product Variable Path | Output DataType | Scale Factor | Base Offset | Operational Packing Domain / Units |
 | --- | --- | --- | --- | --- |
-| `LST` | K | `uint16` | 0.02 | 0 |
-| `SST` | K | `uint16` | 0.02 | 0 |
-| `LST_err` | K | `uint8` | 0.04 | 0 |
-| `Emis*` | emissivity | `uint8` | 0.002 | 0.49 |
-| `Emis*_err` | emissivity error | `uint16` | 1e-4 | 0 |
-| `EmisWB` | emissivity | `uint8` | 0.002 | 0.49 |
-| `PWV` | cm | `uint16` | 0.001 | 0 |
-| `view_zenith` | degrees | `float32` | 1 | 0 |
-| `height` | km internally in `vRAD.El`, converted to m in output | `float32` | 1 | 0 |
+| `/Data Fields/LST` | `UInt16` | 0.02 | 0.0 | $7500 \dots 65535\text{ K}$ |
+| `/Data Fields/SST` | `UInt16` | 0.02 | 0.0 | $7500 \dots 65535\text{ K}$ |
+| `/Data Fields/LST_err` | `UInt8` | 0.04 | 0.0 | $1 \dots 255\text{ K}$ |
+| `/Data Fields/Emisb` | `UInt8` | 0.002 | 0.49 | $1 \dots 255$ (Dimensionless) |
+| `/Data Fields/Emisb_err` | `UInt16` | $1.0 \times 10^{-4}$ | 0.0 | $1 \dots 65535$ (Dimensionless) |
+| `/Data Fields/EmisWB` | `UInt8` | 0.002 | 0.49 | $1 \dots 255$ (Dimensionless) |
+| `/Data Fields/PWV` | `UInt16` | 0.001 | 0.0 | $1 \dots 65535\text{ cm}$ |
+| `/Data Fields/view_zenith` | `Float32` | 1.0 | 0.0 | Full Range (Degrees) |
+| `/Data Fields/height` | `Float32` | 1.0 | 0.0 | Converted from internal km to m |
 
-Invalid or out-of-range values are replaced with dataset-specific fill values, generally zero for packed integer products.
+> **Fill Value Convention:** Pixels flagged as unproduced, missing, or obscured by clouds are assigned a dataset-specific fill value, generally evaluating to 0 within the packed integer structures.
 
-## Stage 18: Write Product Structure And Metadata
+### Stage 18: HDF-EOS Structure Serialization
 
-The file then:
+1. Construct the core HDF-EOS group layout hierarchy under path `/HDFEOS/GRIDS/ECO_L2G_LSTE_70m`.
+2. Write all quantized output integer datasets and floating-point geometry layers.
+3. If running in 3-band mode, populate dummy data arrays for bands 1 and 3 to ensure schema stability across products.
+4. Copy standard metadata from the radiance input, appending processing system profiles (`AncillaryNWP`, `CollectionLabel`, `BuildID`, percent good quality, average good LST and emissivities, band specifications, and bounding box coordinates).
+5. Generate the descriptive external CAS XML metadata files (`.met`) for both the LSTE and Cloud data products to facilitate automated catalog ingest operations.
 
-1. Creates the HDF-EOS group structure for `ECO_L2G_LSTE_70m`.
-2. Writes all output data fields.
-3. Inserts dummy emissivity datasets for bands 1 and 3 in 3-band mode so the output schema remains stable.
-4. Copies standard metadata from the radiance input.
-5. Overlays metadata from runtime parameter groups.
-6. Adds product-specific fields such as:
-   - NWP source
-   - percent good quality
-   - average good LST and emissivities
-   - band specification
-   - cloud summary statistics
-7. Writes both HDF5 metadata groups and `.met` XML sidecar files for LSTE and cloud.
+---
 
-## End-To-End Verbal Instructions
+## 9. Unified Quality Control Bit-Mapping Architecture
+
+The Quality Control layer maps processing metadata into a spatial matrix of 16-bit unsigned integer bitmasks (`uint16`). The bit configurations are integrated below:
+
+| Bit Field Index | Semantic Operational Meaning in Pipeline Flow |
+| --- | --- |
+| **0–1** | Mandatory State Classification: 00 = Good, 01 = Nominal, 10 = Cloudy, 11 = Not Produced |
+| **2–3** | Missing Data Scan Line Flags / Missing Bad Input State |
+| **4–5** | Land/Water Cover Classification Mask |
+| **6–7** | NEM Core Solver Convergence Quality (Based on relaxation loop iteration count) |
+| **8–9** | Sky Radiance Contamination Calibration Test Bounds (Calculated via $skyr_{band2} / Y_{band2}$) |
+| **10–11** | MMD-Based Spectral Contrast Structural Quality Tier |
+| **12–13** | Parametric Emissivity Uncertainty Quality Tier Evaluation |
+| **14–15** | Parametric LST Uncertainty Quality Tier Evaluation |
+
+---
+
+## 10. Reimplementation & Module Boundaries Blueprint
+
+### 10.1 Core Behaviors Worth Preserving
+
+If you re-implement this workflow in another computing environment, preserve these foundational execution constraints:
+
+1. **LUT Mastery:** Use the same table-driven radiance/temperature conversions everywhere. The operational path does not execute analytic Planck equations inside the primary solver loops.
+2. **Compact Index Remapping:** Maintain strict separation between the physical sensor band sequence and the internal processing array index when running in 3-band mode.
+3. **Dual-Pass Humidity Inversion:** Retain the two-pass RTTOV branch when TG/WVS is enabled. Pass 2 is not a structural geometric rerun; it requires a strict 0.7 scaling modifier applied directly to the humidity profile vectors.
+4. **Surface Mask Defaulting:** Maintain the baseline behavior of variable `gp_water` (initialized to 1) unless explicitly replacing it with an operational land/vegetation classification structure.
+5. **Post-TES Cloud Masking:** Run cloud integration as an independent post-processing block. The TES core separation engine evaluates pixels before the final cloud mask layer is ingested and applied.
+
+### 10.2 Practical Module Boundaries Matrix
+
+| Suggested Programmatic Module | Isolated Functional Responsibilities |
+| --- | --- |
+| **Config Loader** | XML file parsing, runtime parameter overrides, filename structural derivation |
+| **L1 Reader** | Ingesting raw radiances, geolocation attributes, parsing `DataQ` quality metrics |
+| **NWP Adapter** | Source checking, profile clamping, vertical pressure reversals, TCW fallback loops |
+| **RTTOV Interface** | Binary stream writing (`prof_in.bin`), subprocess execution, text block parsing |
+| **LUT Service** | High-performance coordinate searching and 1D interpolation mapping helpers |
+| **TG/WVS Modulator** | $Tg$ derivation, raw gamma computation, streaming `smooth2d` field filtering |
+| **TES Kernel** | Running `NEM_planck`, relative $\beta_2$ matrix scaling, MMD evaluation, LST extraction |
+| **Cloud Integration** | External shell invocation, mask grid extraction, lapse-rate statistic calculations |
+| **Error Model** | Evaluating $d\epsilon_b$ and $dT$ polynomials, missing scan inflation, QC bitmask construction |
+| **SST Solver** | Chronological coefficient array interpolation, evaluating split-window regressions |
+| **Product Writer** | Integer quantization scaling, HDF-EOS group construction, XML metadata parsing |
+
+---
+
+## 11. End-To-End Summary Instructions for Implementation
 
 Start by reading the run configuration and runtime parameters, choosing whether the granule will be processed in 3-band or 5-band mode, and constructing the output filenames and metadata containers.
 
-Read the input radiance and geometry data, stack the selected thermal bands into `Y`, and derive a geographic bounding box from the granule latitude and longitude grids. If TG/WVS is enabled, load ASTER GED emissivity for the granule footprint before continuing.
+Read the input radiance and geometry data, stack the selected thermal bands into $Y$, and derive a geographic bounding box from the granule latitude and longitude grids. If TG/WVS is enabled, load ASTER GED emissivity for the granule footprint before continuing.
 
 Read the atmospheric input from the configured NWP source, normalize and clamp the fields, and compute total column water if the source does not provide it explicitly. Crop the NWP domain to the granule neighborhood, map the granule geometry onto that cropped atmospheric grid, and choose the RTTOV skin-temperature input from the provided skin temperature field or the lowest atmospheric temperature level.
 
 Transform the cropped atmospheric state into the flattened RTTOV input layout and run RTTOV once using the unscaled humidity profile. If TG/WVS is enabled, run RTTOV a second time after scaling the humidity inputs by 0.7. Interpolate the RTTOV outputs from the coarse atmospheric grid back to the granule geometry to produce transmission, path radiance, downwelling sky radiance, and precipitable water vapor on the original ECOSTRESS grid.
 
-Load the radiance-to-temperature lookup table. If TG/WVS is enabled, compute `Tg`, derive the raw gamma field, modify and smooth it into `gi`, and use `gi` to blend the two RTTOV runs into corrected surface radiance. Otherwise, compute corrected surface radiance directly from the first RTTOV transmission and path radiance.
+Load the radiance-to-temperature lookup table. If TG/WVS is enabled, compute $Tg$, derive the raw gamma field, modify and smooth it into $gi$, and use $gi$ to blend the two RTTOV runs into corrected surface radiance. Otherwise, compute corrected surface radiance directly from the first RTTOV transmission and path radiance.
 
 Run the TES retrieval on each pixel to obtain land surface temperature, band emissivities, and the initial quality flags. Next, generate the cloud product, re-read the final cloud mask, and use that mask to update QA and cloud summary metadata.
 
 Compute wideband emissivity, emissivity uncertainty, LST uncertainty, and the final QC refinements, including the missing-scan adjustments. Then compute sea surface temperature by loading the SST coefficient grids, interpolating those coefficients to the granule, converting the observed radiance to brightness temperatures for bands 4 and 5, and evaluating the SST regression.
 
 Finally, scale and pack every floating-point retrieval into its external product type, write the LSTE output datasets and metadata, update the cloud product metadata, and emit the sidecar `.met` files for both products.
-
-## Reimplementation Notes
-
-If you re-implement this workflow in another language, preserve these behaviors exactly or consciously replace them:
-
-1. Use the same LUT-driven radiance/temperature conversions everywhere. The code does not use analytic Planck equations in the final path.
-2. Preserve band remapping in 3-band mode. The compact processing index is not the same as the physical ECOSTRESS band number.
-3. Keep the two-pass RTTOV branch if TG/WVS is enabled. The second pass is not a rerun with different geometry; it is specifically a humidity-scaled variant.
-4. Preserve the current `gp_water` behavior unless you intentionally implement a real graybody/vegetation classification. As written, `tes_main.c` always uses the bare coefficient set.
-5. Keep cloud masking and QA updates as a post-TES refinement step. TES itself runs before the final cloud mask is re-read from the cloud product.
-6. Apply the same packing scales and fill-value conventions if bitwise compatibility with the current products matters.
-
-## Practical Module Boundaries For A Rewrite
-
-An implementation in another language will be easier to maintain if split into modules roughly matching these boundaries:
-
-| Suggested module | Responsibilities |
-| --- | --- |
-| Config loader | XML parsing, runtime parameter overrides, file naming |
-| L1 reader | Radiance, geolocation, data quality, masks |
-| NWP adapter | Source-specific readers, clamping, TCW fallback, crop extraction |
-| RTTOV interface | Binary profile writing, external execution, output parsing |
-| LUT service | Temperature/radiance interpolation helpers |
-| TG/WVS | `Tg`, gamma, smoothing, two-pass atmospheric blending |
-| TES kernel | `NEM_planck`, emissivity recovery, LST retrieval, initial QC |
-| Cloud integration | Cloud product call + final mask readback |
-| Error model | `de`, `dT`, missing-scan inflation, QC completion |
-| SST | coefficient-grid interpolation and SST regression |
-| Product writer | Packing, HDF5 layout, metadata, sidecars |
-
-That decomposition matches the actual control flow in `tes_main.c` while isolating the algorithmic pieces that are most likely to be ported and tested independently.
